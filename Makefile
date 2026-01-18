@@ -266,7 +266,7 @@ cli: $(CLI_WASM)
 # Extensible build (with extension API)
 EXTENSIBLE_WASM := $(BUILD_DIR)/sqlite-extensible.wasm
 
-# Compiler flags for extensible build (includes both bindings dirs)
+# Compiler flags for extensible build (bindings-ext first for compatibility wrapper)
 CFLAGS_EXT := \
     --target=$(TARGET) \
     --sysroot=$(WASI_SYSROOT) \
@@ -277,7 +277,6 @@ CFLAGS_EXT := \
     -Wno-unused-parameter \
     -I$(DEPS_DIR)/sqlite \
     -I$(SRC_DIR) \
-    -I$(BINDINGS_DIR) \
     -I$(BINDINGS_EXT_DIR) \
     $(SQLITE_CFLAGS)
 
