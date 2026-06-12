@@ -20,12 +20,12 @@
 use std::env;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use wasmtime::component::{Component, Linker};
 use wasmtime::Store;
 use wasmtime_wasi::{WasiCtxBuilder, ResourceTable};
 
-use sqlite_wasm_host::{policy::Policy, Host};
+use sqlite_wasm_host::{bindings, HostWrap, LoaderData, Host};
 
 /// HostState passed to wasmtime; carries WASI resources + a reference
 /// to the loader so the (future) extension-loader host functions can
@@ -63,13 +63,24 @@ fn main() -> Result<()> {
     let engine = host.engine().clone();
 
     let component_bytes = std::fs::read(&component_path)
-        .with_context(|| format!("read {}", component_path.display()))?;
+        .map_err(|e| anyhow!("read {}: {e}", component_path.display()))?;
     let component = Component::from_binary(&engine, &component_bytes)
         .map_err(|e| anyhow!("compile component: {e}"))?;
 
     let mut linker: Linker<State> = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
         .map_err(|e| anyhow!("wire WASI: {e}"))?;
+
+    // Wire the sqlite:wasm/extension-loader interface so the in-WASM
+    // CLI's `.load /path/ext.wasm` command can route through here
+    // when wired on the wasm side (currently the in-WASM CLI calls
+    // sqlite3_load_extension directly; routing it through the WIT
+    // interface is the matching change on the sqlite-wasm side).
+    bindings::sqlite::wasm::extension_loader::add_to_linker::<_, LoaderData>(
+        &mut linker,
+        |state: &mut State| HostWrap { host: &mut state.host },
+    )
+    .map_err(|e| anyhow!("wire extension-loader: {e}"))?;
 
     // Build the WASI context: pass guest args through, inherit stdio,
     // inherit env vars so DEBUG flags and the like flow through.
