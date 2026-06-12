@@ -120,7 +120,13 @@ fn main() -> Result<()> {
     let result = command
         .wasi_cli_run()
         .call_run(&mut store)
-        .map_err(|e| anyhow!("wasi:cli/run.run: {e}"))?;
+        .map_err(|e| {
+            // Print the full error chain so traps surface with their
+            // reason (epoch interrupt, oob, fuel exhaustion, ...)
+            // rather than the call-site message alone.
+            eprintln!("trap: {e:?}");
+            anyhow!("wasi:cli/run.run: {e}")
+        })?;
 
     match result {
         Ok(()) => Ok(()),

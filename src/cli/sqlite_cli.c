@@ -13,6 +13,13 @@
 #include <time.h>
 #include "sqlite3.h"
 
+#ifdef SQLITE_WASM_UNIFIED
+/* Routes .load through the sqlite:wasm/extension-loader WIT interface
+ * the host provides (sqlite-wasm-host crate). The legacy build keeps
+ * the placeholder behavior below. */
+#include "sqlite_cli_unified.h"
+#endif
+
 /* Maximum input line length */
 #define MAX_LINE 8192
 
@@ -534,14 +541,62 @@ static int do_meta_command(CliState *state, const char *line) {
         } else if (g_extension_count >= MAX_EXTENSIONS) {
             fprintf(stderr, "Error: maximum number of extensions (%d) already loaded\n", MAX_EXTENSIONS);
         } else {
-            /* In a full WASM component implementation, this would:
-             * 1. Call the imported extension-loader interface to load the WASM component
-             * 2. Get extension info (name, version, functions)
-             * 3. Register the extension's functions with SQLite
-             *
-             * For now, we track the extension locally and print a message.
-             * The actual loading happens on the host side.
-             */
+#ifdef SQLITE_WASM_UNIFIED
+            /* Unified build: call the host's extension-loader.
+             * load-extension(path, options) over the WIT boundary.
+             * The host (sqlite-wasm-host) reads the file, instantiates
+             * the component, runs the policy gate, and returns a
+             * manifest. */
+            sqlite_cli_unified_string_t wit_path;
+            wit_path.ptr = (uint8_t *)arg1;
+            wit_path.len = strlen(arg1);
+
+            /* Permissive default LoadOptions for interactive .load:
+             * deny-all grant list (extension can use no host SPI
+             * capabilities unless explicitly granted via a future
+             * .load-with-policy command), all numeric knobs unset
+             * (host's defaults apply), no http policy. The fields
+             * default to zero / is_some=false from the stack alloc. */
+            sqlite_wasm_extension_loader_load_options_t opts = {0};
+
+            sqlite_wasm_extension_loader_manifest_t manifest = {0};
+            sqlite_wasm_extension_loader_loader_error_t err = {0};
+
+            bool ok = sqlite_wasm_extension_loader_load_extension(
+                &wit_path, &opts, &manifest, &err);
+            if (!ok) {
+                fprintf(stderr, "Error loading %s: ", arg1);
+                fwrite(err.message.ptr, 1, err.message.len, stderr);
+                fprintf(stderr, " (code %d)\n", err.code);
+                sqlite_wasm_extension_loader_loader_error_free(&err);
+            } else {
+                LoadedExtension *ext = &g_extensions[g_extension_count];
+                strncpy(ext->path, arg1, sizeof(ext->path) - 1);
+                ext->path[sizeof(ext->path) - 1] = '\0';
+
+                size_t n = manifest.name.len < sizeof(ext->name) - 1
+                               ? manifest.name.len : sizeof(ext->name) - 1;
+                memcpy(ext->name, manifest.name.ptr, n);
+                ext->name[n] = '\0';
+
+                n = manifest.version.len < sizeof(ext->version) - 1
+                        ? manifest.version.len : sizeof(ext->version) - 1;
+                memcpy(ext->version, manifest.version.ptr, n);
+                ext->version[n] = '\0';
+
+                ext->num_functions = (int)manifest.scalar_functions.len;
+                ext->loaded = true;
+                g_extension_count++;
+
+                printf("Loaded extension: %s %s from %s (%d functions)\n",
+                       ext->name, ext->version, ext->path, ext->num_functions);
+                sqlite_wasm_extension_loader_manifest_free(&manifest);
+            }
+#else
+            /* Legacy build (sqlite-cli.wasm / sqlite-extensible): the
+             * extension-loader WIT interface isn't in scope; track the
+             * extension name locally for the .extensions command and
+             * print a note. Real loading is the unified build's job. */
             LoadedExtension *ext = &g_extensions[g_extension_count];
             strncpy(ext->path, arg1, sizeof(ext->path) - 1);
             ext->path[sizeof(ext->path) - 1] = '\0';
@@ -567,6 +622,7 @@ static int do_meta_command(CliState *state, const char *line) {
 
             printf("Loaded extension: %s from %s\n", ext->name, ext->path);
             printf("Note: Extension loading requires host-side WASM component support.\n");
+#endif
         }
     }
     else if (strcasecmp(cmd_name, "unload") == 0) {
