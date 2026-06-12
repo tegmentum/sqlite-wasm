@@ -1,0 +1,74 @@
+// SQLite WASM full-CLI composition.
+//
+// Wires the sqlite-wasm CLI together with the four in-WASM extensions
+// (FTS5, JSON1, R-Tree, GeoPoly). Replaces the old
+// `wasm-tools compose -d fts5=... -d json1=...` flow.
+//
+// Run with:
+//   wac compose composition.wac \
+//     -d sqlite:wasm=build/sqlite-cli.wasm \
+//     -d sqlite:fts5-extension=build/extensions/fts5.wasm \
+//     -d sqlite:json1-extension=build/extensions/json1.wasm \
+//     -d sqlite:rtree-extension=build/extensions/rtree.wasm \
+//     -d sqlite:geopoly-extension=build/extensions/geopoly.wasm \
+//     -o build/sqlite-cli-full.wasm
+//
+// PRECONDITION: requires the unified-WIT migration (task #12) so the CLI
+// world declares one per-extension import slot and each extension world
+// exports the matching slot interface. Until that lands, fall back to the
+// existing `wasm-tools compose -d <name>=<file>` targets.
+
+package sqlite:cli-full@0.1.0;
+
+// --- instantiate each extension as a separate component instance ---
+// Each extension imports the host SPI it needs (types, spi, logging,
+// config) — wired below to the CLI's exports of the same interfaces.
+
+let fts5 = new sqlite:fts5-extension {
+    "sqlite:extension/types@0.1.0": cli["sqlite:extension/types@0.1.0"],
+    "sqlite:extension/spi@0.1.0": cli["sqlite:extension/spi@0.1.0"],
+    "sqlite:extension/logging@0.1.0": cli["sqlite:extension/logging@0.1.0"],
+    "sqlite:extension/config@0.1.0": cli["sqlite:extension/config@0.1.0"],
+};
+
+let json1 = new sqlite:json1-extension {
+    "sqlite:extension/types@0.1.0": cli["sqlite:extension/types@0.1.0"],
+    "sqlite:extension/spi@0.1.0": cli["sqlite:extension/spi@0.1.0"],
+    "sqlite:extension/logging@0.1.0": cli["sqlite:extension/logging@0.1.0"],
+    "sqlite:extension/config@0.1.0": cli["sqlite:extension/config@0.1.0"],
+};
+
+let rtree = new sqlite:rtree-extension {
+    "sqlite:extension/types@0.1.0": cli["sqlite:extension/types@0.1.0"],
+    "sqlite:extension/spi@0.1.0": cli["sqlite:extension/spi@0.1.0"],
+    "sqlite:extension/logging@0.1.0": cli["sqlite:extension/logging@0.1.0"],
+    "sqlite:extension/config@0.1.0": cli["sqlite:extension/config@0.1.0"],
+};
+
+let geopoly = new sqlite:geopoly-extension {
+    "sqlite:extension/types@0.1.0": cli["sqlite:extension/types@0.1.0"],
+    "sqlite:extension/spi@0.1.0": cli["sqlite:extension/spi@0.1.0"],
+    "sqlite:extension/logging@0.1.0": cli["sqlite:extension/logging@0.1.0"],
+    "sqlite:extension/config@0.1.0": cli["sqlite:extension/config@0.1.0"],
+};
+
+// --- instantiate the sqlite-wasm CLI ---
+// The CLI's per-extension import slots get wired to the matching exports
+// from each extension instance. The slot interfaces (fts5-slot, etc.)
+// live in sqlite:wasm@0.1.0 and re-declare metadata.describe +
+// scalar-function.call with a distinct identity per slot, which is what
+// keeps `wasm-tools`-style automatic resolution happy while still letting
+// the host see each extension as a distinct dispatch target.
+
+let cli = new sqlite:wasm {
+    "sqlite:wasm/fts5-slot@0.1.0": fts5["sqlite:wasm/fts5-slot@0.1.0"],
+    "sqlite:wasm/json1-slot@0.1.0": json1["sqlite:wasm/json1-slot@0.1.0"],
+    "sqlite:wasm/rtree-slot@0.1.0": rtree["sqlite:wasm/rtree-slot@0.1.0"],
+    "sqlite:wasm/geopoly-slot@0.1.0": geopoly["sqlite:wasm/geopoly-slot@0.1.0"],
+};
+
+// The composed binary is the CLI with all extensions linked in. The
+// host running it (wasmtime / jco / browser) still satisfies the
+// remaining imports: extension-loader (for runtime .load) and any WASI
+// the CLI uses.
+export cli...;

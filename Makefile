@@ -111,6 +111,7 @@ help:
 	@echo "  cli-zip      Build CLI composed with zip-wasm (.archive support)"
 	@echo "  cli-common   Build CLI composed with FTS5 + JSON1"
 	@echo "  cli-full     Build CLI with all extensions + ZIP support"
+	@echo "  cli-wac      Same as cli-full but composed via wac (requires unified-WIT migration)"
 	@echo "  extensions   Build all WASM extensions (FTS5, R-Tree, JSON1, GeoPoly)"
 	@echo "  test         Run tests"
 	@echo "  clean        Remove build artifacts"
@@ -516,7 +517,33 @@ $(CLI_FULL_WASM): $(CLI_WASM) $(FTS5_WASM) $(JSON1_WASM) $(RTREE_WASM) $(GEOPOLY
 
 cli-full: extensions $(CLI_FULL_WASM)
 
-.PHONY: cli-zip cli-common cli-full
+# =============================================================================
+# Composition via wac (forward-looking; pairs with the unified-WIT migration)
+# =============================================================================
+# Builds the full CLI by composing sqlite-cli.wasm with all four in-WASM
+# extensions via the `wac` composer. Per-instance wiring is described in
+# composition.wac. Requires task #12 (the wit/ swap to sqlite:extension +
+# per-extension slot interfaces in sqlite:wasm). Until that lands, prefer
+# the `cli-full` target above which uses `wasm-tools compose`.
+
+CLI_WAC_WASM := $(BUILD_DIR)/sqlite-cli-wac.wasm
+
+$(CLI_WAC_WASM): composition.wac $(CLI_WASM) $(FTS5_WASM) $(JSON1_WASM) $(RTREE_WASM) $(GEOPOLY_WASM)
+	@echo "Composing CLI with wac..."
+	@command -v wac >/dev/null 2>&1 || (echo "wac not found. Install with: cargo install wac-cli" && exit 1)
+	wac compose composition.wac \
+		-d sqlite:wasm=$(CLI_WASM) \
+		-d sqlite:fts5-extension=$(FTS5_WASM) \
+		-d sqlite:json1-extension=$(JSON1_WASM) \
+		-d sqlite:rtree-extension=$(RTREE_WASM) \
+		-d sqlite:geopoly-extension=$(GEOPOLY_WASM) \
+		-o $@
+	@echo "Built: $@"
+	@ls -lh $@
+
+cli-wac: extensions $(CLI_WAC_WASM)
+
+.PHONY: cli-zip cli-common cli-full cli-wac
 
 # =============================================================================
 # Clean build artifacts
