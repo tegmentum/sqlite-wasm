@@ -31,3 +31,6 @@ wasi-sdk-*/
 
 # Generated
 compile_commands.json
+
+# Host crate build artifacts (Rust target/)
+host/target/

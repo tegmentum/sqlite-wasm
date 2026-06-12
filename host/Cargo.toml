@@ -1,0 +1,25 @@
+[package]
+name = "sqlite-wasm-host"
+version = "0.1.0"
+edition = "2021"
+description = "Reference wasmtime-based host for SQLite-in-WebAssembly components. Implements sqlite:wasm/extension-loader using the unified sqlite:extension contract."
+license = "MIT"
+
+[[bin]]
+name = "sqlite-wasm-run"
+path = "src/main.rs"
+
+[lib]
+name = "sqlite_wasm_host"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+wasmtime = { version = "45.0.1", features = [
+    "component-model",
+    "cranelift",
+    "parallel-compilation",
+] }
+wasmtime-wasi = "45.0.1"
+parking_lot = "0.12"
+tracing = "0.1"
