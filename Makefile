@@ -535,6 +535,61 @@ extensions: $(FTS5_WASM) $(RTREE_WASM) $(JSON1_WASM) $(GEOPOLY_WASM)
 	@echo "All extensions built:"
 	@ls -lh $(EXT_BUILD_DIR)/*.wasm
 
+# =============================================================================
+# Unified CLI (command-mode driver for the unified-WIT build)
+# =============================================================================
+# Command binary that links the same unified glue as the reactor
+# (extension-unified.c with its auto-extension chain, low_level /
+# high_level / sqlite_wasm / bindings) plus the existing CLI front-end
+# (src/cli/sqlite_cli.c). The CLI calls sqlite3 directly; the unified
+# glue surfaces the per-slot imports so a `wac plug` of the demo
+# extension satisfies them.
+CLI_UNIFIED_WASM := $(BUILD_DIR)/sqlite-cli-unified.wasm
+
+CLI_UNIFIED_CFLAGS := \
+    --target=$(TARGET) \
+    --sysroot=$(WASI_SYSROOT) \
+    -O2 \
+    -g \
+    -Wall \
+    -I$(DEPS_DIR)/sqlite \
+    -I$(SRC_DIR) \
+    -I$(BINDINGS_UNIFIED_DIR) \
+    -D_WASI_EMULATED_PROCESS_CLOCKS \
+    $(WASM_FEATURES) \
+    $(SQLITE_CFLAGS)
+
+CLI_UNIFIED_LDFLAGS := \
+    --target=$(TARGET) \
+    --sysroot=$(WASI_SYSROOT) \
+    -lwasi-emulated-process-clocks
+
+CLI_UNIFIED_OBJS := \
+    $(BUILD_DIR)/sqlite3.o \
+    $(BUILD_DIR)/vfs_memory.o \
+    $(BUILD_DIR)/vfs_wasi.o \
+    $(BUILD_DIR)/sqlite_wasm_unified.o \
+    $(BUILD_DIR)/extension_unified.o \
+    $(BUILD_DIR)/low_level_unified.o \
+    $(BUILD_DIR)/high_level_unified.o \
+    $(BUILD_DIR)/sqlite_cli_unified_main.o \
+    $(BUILD_DIR)/sqlite_cli_unified.o \
+    $(BINDINGS_UNIFIED_DIR)/sqlite_cli_unified_component_type.o
+
+$(BUILD_DIR)/sqlite_cli_unified_main.o: $(CLI_SRC) $(BINDINGS_UNIFIED_DIR)/sqlite_cli_unified.h | $(BUILD_DIR)
+	@echo "Compiling CLI main (unified)..."
+	$(CC) $(CLI_UNIFIED_CFLAGS) -c $< -o $@
+
+$(CLI_UNIFIED_WASM): $(CLI_UNIFIED_OBJS)
+	@echo "Linking CLI (unified)..."
+	$(CC) $(CLI_UNIFIED_LDFLAGS) $(CLI_UNIFIED_OBJS) -o $@
+	@echo "Built: $@"
+	@ls -lh $@
+
+cli-unified: bindings-unified $(CLI_UNIFIED_WASM)
+
+.PHONY: cli-unified
+
 # Demo extension (unified-WIT demonstration; pairs with `unified` target).
 # Exports sqlite:wasm/demo-slot and implements wasm_reverse + wasm_double.
 DEMO_DIR := $(EXTENSIONS_DIR)/wasm-demo
@@ -575,7 +630,21 @@ $(COMPOSED_DEMO_WASM): $(UNIFIED_WASM) $(DEMO_WASM)
 
 cli-demo: $(COMPOSED_DEMO_WASM)
 
-.PHONY: extension-demo cli-demo
+# Composed COMMAND-mode CLI with the demo extension wired in. The
+# resulting wasm runs directly under wasmtime, accepts SQL on stdin,
+# and prints results on stdout — including the wasm_reverse and
+# wasm_double functions the demo extension provides.
+CLI_DEMO_WASM := $(BUILD_DIR)/sqlite-cli-demo.wasm
+
+$(CLI_DEMO_WASM): $(CLI_UNIFIED_WASM) $(DEMO_WASM)
+	@echo "Composing CLI + demo via wac plug..."
+	wac plug --plug $(DEMO_WASM) $(CLI_UNIFIED_WASM) -o $@
+	@echo "Built: $@"
+	@ls -lh $@
+
+cli-demo-test: $(CLI_DEMO_WASM)
+
+.PHONY: extension-demo cli-demo cli-demo-test
 
 # =============================================================================
 # WASM Component Composition
