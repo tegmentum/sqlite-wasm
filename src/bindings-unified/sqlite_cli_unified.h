@@ -579,20 +579,12 @@ typedef struct {
   } val;
 } sqlite_wasm_demo_slot_result_sql_value_string_t;
 
-// =========================================================================
-// Extension Information
-// =========================================================================
-// Information about a loaded extension
-typedef struct sqlite_wasm_extension_loader_extension_info_t {
-  // Name of the extension
-  sqlite_cli_unified_string_t   name;
-  // Version string
-  sqlite_cli_unified_string_t   version;
-  // List of SQL functions provided by this extension
-  sqlite_cli_unified_list_string_t   functions;
-} sqlite_wasm_extension_loader_extension_info_t;
+typedef sqlite_extension_metadata_manifest_t sqlite_wasm_extension_loader_manifest_t;
 
-// Error returned by loader operations
+typedef sqlite_extension_policy_load_options_t sqlite_wasm_extension_loader_load_options_t;
+
+// Errors the loader may raise (file not found, instantiate
+// failure, policy refusal, ...).
 typedef struct sqlite_wasm_extension_loader_loader_error_t {
   int32_t   code;
   sqlite_cli_unified_string_t   message;
@@ -601,10 +593,10 @@ typedef struct sqlite_wasm_extension_loader_loader_error_t {
 typedef struct {
   bool is_err;
   union {
-    sqlite_wasm_extension_loader_extension_info_t ok;
+    sqlite_wasm_extension_loader_manifest_t ok;
     sqlite_wasm_extension_loader_loader_error_t err;
   } val;
-} sqlite_wasm_extension_loader_result_extension_info_loader_error_t;
+} sqlite_wasm_extension_loader_result_manifest_loader_error_t;
 
 typedef struct {
   bool is_err;
@@ -614,9 +606,9 @@ typedef struct {
 } sqlite_wasm_extension_loader_result_void_loader_error_t;
 
 typedef struct {
-  sqlite_wasm_extension_loader_extension_info_t *ptr;
+  sqlite_wasm_extension_loader_manifest_t *ptr;
   size_t len;
-} sqlite_wasm_extension_loader_list_extension_info_t;
+} sqlite_wasm_extension_loader_list_manifest_t;
 
 // Archive information
 typedef struct sqlite_wasm_zip_operations_archive_info_t {
@@ -1076,17 +1068,15 @@ extern void sqlite_wasm_demo_slot_describe(sqlite_wasm_demo_slot_manifest_t *ret
 extern bool sqlite_wasm_demo_slot_call(uint64_t func_id, sqlite_wasm_demo_slot_list_sql_value_t *args, sqlite_wasm_demo_slot_sql_value_t *ret, sqlite_cli_unified_string_t *err);
 
 // Imported Functions from `sqlite:wasm/extension-loader@0.1.0`
-// =========================================================================
-// Extension Loading
-// =========================================================================
-// Load a WASM extension component by path
-// Returns extension info on success
-extern bool sqlite_wasm_extension_loader_load_extension(sqlite_cli_unified_string_t *path, sqlite_wasm_extension_loader_extension_info_t *ret, sqlite_wasm_extension_loader_loader_error_t *err);
-// Unload an extension by name
+// Load a WASM extension component from a host path under the
+// supplied policy. Returns the verified manifest on success — the
+// same shape produced by metadata.describe().
+extern bool sqlite_wasm_extension_loader_load_extension(sqlite_cli_unified_string_t *path, sqlite_wasm_extension_loader_load_options_t *options, sqlite_wasm_extension_loader_manifest_t *ret, sqlite_wasm_extension_loader_loader_error_t *err);
+// Unload a previously loaded extension by name.
 extern bool sqlite_wasm_extension_loader_unload_extension(sqlite_cli_unified_string_t *name, sqlite_wasm_extension_loader_loader_error_t *err);
-// List all currently loaded extensions
-extern void sqlite_wasm_extension_loader_list_extensions(sqlite_wasm_extension_loader_list_extension_info_t *ret);
-// Check if an extension is loaded
+// List currently loaded extensions as their manifests.
+extern void sqlite_wasm_extension_loader_list_extensions(sqlite_wasm_extension_loader_list_manifest_t *ret);
+// True iff an extension with the given name is currently loaded.
 extern bool sqlite_wasm_extension_loader_is_extension_loaded(sqlite_cli_unified_string_t *name);
 
 // Imported Functions from `sqlite:wasm/zip-operations@0.1.0`
@@ -1309,15 +1299,17 @@ void sqlite_wasm_demo_slot_list_sql_value_free(sqlite_wasm_demo_slot_list_sql_va
 
 void sqlite_wasm_demo_slot_result_sql_value_string_free(sqlite_wasm_demo_slot_result_sql_value_string_t *ptr);
 
-void sqlite_wasm_extension_loader_extension_info_free(sqlite_wasm_extension_loader_extension_info_t *ptr);
+void sqlite_wasm_extension_loader_manifest_free(sqlite_wasm_extension_loader_manifest_t *ptr);
+
+void sqlite_wasm_extension_loader_load_options_free(sqlite_wasm_extension_loader_load_options_t *ptr);
 
 void sqlite_wasm_extension_loader_loader_error_free(sqlite_wasm_extension_loader_loader_error_t *ptr);
 
-void sqlite_wasm_extension_loader_result_extension_info_loader_error_free(sqlite_wasm_extension_loader_result_extension_info_loader_error_t *ptr);
+void sqlite_wasm_extension_loader_result_manifest_loader_error_free(sqlite_wasm_extension_loader_result_manifest_loader_error_t *ptr);
 
 void sqlite_wasm_extension_loader_result_void_loader_error_free(sqlite_wasm_extension_loader_result_void_loader_error_t *ptr);
 
-void sqlite_wasm_extension_loader_list_extension_info_free(sqlite_wasm_extension_loader_list_extension_info_t *ptr);
+void sqlite_wasm_extension_loader_list_manifest_free(sqlite_wasm_extension_loader_list_manifest_t *ptr);
 
 void sqlite_wasm_zip_operations_archive_info_free(sqlite_wasm_zip_operations_archive_info_t *ptr);
 

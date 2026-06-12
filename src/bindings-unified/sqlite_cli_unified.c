@@ -58,7 +58,7 @@ extern void __wasm_import_sqlite_wasm_demo_slot_call(int64_t, uint8_t *, size_t,
 // Imported Functions from `sqlite:wasm/extension-loader@0.1.0`
 
 __attribute__((__import_module__("sqlite:wasm/extension-loader@0.1.0"), __import_name__("load-extension")))
-extern void __wasm_import_sqlite_wasm_extension_loader_load_extension(uint8_t *, size_t, uint8_t *);
+extern void __wasm_import_sqlite_wasm_extension_loader_load_extension(uint8_t *, uint8_t *);
 
 __attribute__((__import_module__("sqlite:wasm/extension-loader@0.1.0"), __import_name__("unload-extension")))
 extern void __wasm_import_sqlite_wasm_extension_loader_unload_extension(uint8_t *, size_t, uint8_t *);
@@ -1387,18 +1387,21 @@ void sqlite_wasm_demo_slot_result_sql_value_string_free(sqlite_wasm_demo_slot_re
   }
 }
 
-void sqlite_wasm_extension_loader_extension_info_free(sqlite_wasm_extension_loader_extension_info_t *ptr) {
-  sqlite_cli_unified_string_free(&ptr->name);
-  sqlite_cli_unified_string_free(&ptr->version);
+void sqlite_wasm_extension_loader_manifest_free(sqlite_wasm_extension_loader_manifest_t *ptr) {
+  sqlite_extension_metadata_manifest_free(ptr);
+}
+
+void sqlite_wasm_extension_loader_load_options_free(sqlite_wasm_extension_loader_load_options_t *ptr) {
+  sqlite_extension_policy_load_options_free(ptr);
 }
 
 void sqlite_wasm_extension_loader_loader_error_free(sqlite_wasm_extension_loader_loader_error_t *ptr) {
   sqlite_cli_unified_string_free(&ptr->message);
 }
 
-void sqlite_wasm_extension_loader_result_extension_info_loader_error_free(sqlite_wasm_extension_loader_result_extension_info_loader_error_t *ptr) {
+void sqlite_wasm_extension_loader_result_manifest_loader_error_free(sqlite_wasm_extension_loader_result_manifest_loader_error_t *ptr) {
   if (!ptr->is_err) {
-    sqlite_wasm_extension_loader_extension_info_free(&ptr->val.ok);
+    sqlite_wasm_extension_loader_manifest_free(&ptr->val.ok);
   } else {
     sqlite_wasm_extension_loader_loader_error_free(&ptr->val.err);
   }
@@ -1411,12 +1414,12 @@ void sqlite_wasm_extension_loader_result_void_loader_error_free(sqlite_wasm_exte
   }
 }
 
-void sqlite_wasm_extension_loader_list_extension_info_free(sqlite_wasm_extension_loader_list_extension_info_t *ptr) {
+void sqlite_wasm_extension_loader_list_manifest_free(sqlite_wasm_extension_loader_list_manifest_t *ptr) {
   size_t list_len = ptr->len;
   if (list_len > 0) {
-    sqlite_wasm_extension_loader_extension_info_t *list_ptr = ptr->ptr;
+    sqlite_wasm_extension_loader_manifest_t *list_ptr = ptr->ptr;
     for (size_t i = 0; i < list_len; i++) {
-      sqlite_wasm_extension_loader_extension_info_free(&list_ptr[i]);
+      sqlite_wasm_extension_loader_manifest_free(&list_ptr[i]);
     }
     free(list_ptr);
   }
@@ -2273,27 +2276,106 @@ bool sqlite_wasm_demo_slot_call(uint64_t func_id, sqlite_wasm_demo_slot_list_sql
   }
 }
 
-bool sqlite_wasm_extension_loader_load_extension(sqlite_cli_unified_string_t *path, sqlite_wasm_extension_loader_extension_info_t *ret, sqlite_wasm_extension_loader_loader_error_t *err) {
-  __attribute__((__aligned__(sizeof(void*))))
-  uint8_t ret_area[(7*sizeof(void*))];
+bool sqlite_wasm_extension_loader_load_extension(sqlite_cli_unified_string_t *path, sqlite_wasm_extension_loader_load_options_t *options, sqlite_wasm_extension_loader_manifest_t *ret, sqlite_wasm_extension_loader_loader_error_t *err) {
+  __attribute__((__aligned__(8)))
+  uint8_t ret_area[(112+12*sizeof(void*))];
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_sqlite_wasm_extension_loader_load_extension((uint8_t *) (*path).ptr, (*path).len, ptr);
-  sqlite_wasm_extension_loader_result_extension_info_loader_error_t result;
-  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
+  *((size_t*)(ptr + sizeof(void*))) = (*path).len;
+  *((uint8_t **)(ptr + 0)) = (uint8_t *) (*path).ptr;
+  if (((*options).fuel_per_call).is_some) {
+    const uint64_t *payload0 = &((*options).fuel_per_call).val;
+    *((int8_t*)(ptr + (2*sizeof(void*)))) = 1;
+    *((int64_t*)(ptr + (8+2*sizeof(void*)))) = (int64_t) (*payload0);
+  } else {
+    *((int8_t*)(ptr + (2*sizeof(void*)))) = 0;
+  }
+  if (((*options).memory_limit_bytes).is_some) {
+    const uint64_t *payload2 = &((*options).memory_limit_bytes).val;
+    *((int8_t*)(ptr + (16+2*sizeof(void*)))) = 1;
+    *((int64_t*)(ptr + (24+2*sizeof(void*)))) = (int64_t) (*payload2);
+  } else {
+    *((int8_t*)(ptr + (16+2*sizeof(void*)))) = 0;
+  }
+  if (((*options).epoch_deadline_ms).is_some) {
+    const uint64_t *payload4 = &((*options).epoch_deadline_ms).val;
+    *((int8_t*)(ptr + (32+2*sizeof(void*)))) = 1;
+    *((int64_t*)(ptr + (40+2*sizeof(void*)))) = (int64_t) (*payload4);
+  } else {
+    *((int8_t*)(ptr + (32+2*sizeof(void*)))) = 0;
+  }
+  if (((*options).http_policy).is_some) {
+    const sqlite_extension_policy_http_policy_t *payload6 = &((*options).http_policy).val;
+    *((int8_t*)(ptr + (48+2*sizeof(void*)))) = 1;
+    *((size_t*)(ptr + (56+3*sizeof(void*)))) = ((*payload6).allowed_hosts).len;
+    *((uint8_t **)(ptr + (56+2*sizeof(void*)))) = (uint8_t *) ((*payload6).allowed_hosts).ptr;
+    if (((*payload6).allowed_methods).is_some) {
+      const sqlite_extension_policy_list_method_t *payload8 = &((*payload6).allowed_methods).val;
+      *((int8_t*)(ptr + (56+4*sizeof(void*)))) = 1;
+      *((size_t*)(ptr + (56+6*sizeof(void*)))) = (*payload8).len;
+      *((uint8_t **)(ptr + (56+5*sizeof(void*)))) = (uint8_t *) (*payload8).ptr;
+    } else {
+      *((int8_t*)(ptr + (56+4*sizeof(void*)))) = 0;
+    }
+    if (((*payload6).max_body_bytes).is_some) {
+      const uint64_t *payload20 = &((*payload6).max_body_bytes).val;
+      *((int8_t*)(ptr + (64+6*sizeof(void*)))) = 1;
+      *((int64_t*)(ptr + (72+6*sizeof(void*)))) = (int64_t) (*payload20);
+    } else {
+      *((int8_t*)(ptr + (64+6*sizeof(void*)))) = 0;
+    }
+    if (((*payload6).timeout_ms).is_some) {
+      const uint32_t *payload22 = &((*payload6).timeout_ms).val;
+      *((int8_t*)(ptr + (80+6*sizeof(void*)))) = 1;
+      *((int32_t*)(ptr + (84+6*sizeof(void*)))) = (int32_t) (*payload22);
+    } else {
+      *((int8_t*)(ptr + (80+6*sizeof(void*)))) = 0;
+    }
+  } else {
+    *((int8_t*)(ptr + (48+2*sizeof(void*)))) = 0;
+  }
+  if (((*options).fs_policy).is_some) {
+    const sqlite_extension_policy_fs_policy_t *payload24 = &((*options).fs_policy).val;
+    *((int8_t*)(ptr + (88+6*sizeof(void*)))) = 1;
+    *((size_t*)(ptr + (96+7*sizeof(void*)))) = ((*payload24).readable_prefixes).len;
+    *((uint8_t **)(ptr + (96+6*sizeof(void*)))) = (uint8_t *) ((*payload24).readable_prefixes).ptr;
+    *((size_t*)(ptr + (96+9*sizeof(void*)))) = ((*payload24).writable_prefixes).len;
+    *((uint8_t **)(ptr + (96+8*sizeof(void*)))) = (uint8_t *) ((*payload24).writable_prefixes).ptr;
+    if (((*payload24).max_write_bytes_per_call).is_some) {
+      const uint64_t *payload26 = &((*payload24).max_write_bytes_per_call).val;
+      *((int8_t*)(ptr + (96+10*sizeof(void*)))) = 1;
+      *((int64_t*)(ptr + (104+10*sizeof(void*)))) = (int64_t) (*payload26);
+    } else {
+      *((int8_t*)(ptr + (96+10*sizeof(void*)))) = 0;
+    }
+  } else {
+    *((int8_t*)(ptr + (88+6*sizeof(void*)))) = 0;
+  }
+  *((size_t*)(ptr + (112+11*sizeof(void*)))) = ((*options).grant).len;
+  *((uint8_t **)(ptr + (112+10*sizeof(void*)))) = (uint8_t *) ((*options).grant).ptr;
+  uint8_t *ptr38 = (uint8_t *) &ret_area;
+  __wasm_import_sqlite_wasm_extension_loader_load_extension(ptr, ptr38);
+  sqlite_wasm_extension_loader_result_manifest_loader_error_t result;
+  switch ((int32_t) *((uint8_t*) (ptr38 + 0))) {
     case 0: {
       result.is_err = false;
-      result.val.ok = (sqlite_wasm_extension_loader_extension_info_t) {
-        (sqlite_cli_unified_string_t) (sqlite_cli_unified_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) },
-        (sqlite_cli_unified_string_t) (sqlite_cli_unified_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (3*sizeof(void*))))), (*((size_t*) (ptr + (4*sizeof(void*))))) },
-        (sqlite_cli_unified_list_string_t) (sqlite_cli_unified_list_string_t) { (sqlite_cli_unified_string_t*)(*((uint8_t **) (ptr + (5*sizeof(void*))))), (*((size_t*) (ptr + (6*sizeof(void*))))) },
+      result.val.ok = (sqlite_extension_metadata_manifest_t) {
+        (sqlite_cli_unified_string_t) (sqlite_cli_unified_string_t) { (uint8_t*)(*((uint8_t **) (ptr38 + sizeof(void*)))), (*((size_t*) (ptr38 + (2*sizeof(void*))))) },
+        (sqlite_cli_unified_string_t) (sqlite_cli_unified_string_t) { (uint8_t*)(*((uint8_t **) (ptr38 + (3*sizeof(void*))))), (*((size_t*) (ptr38 + (4*sizeof(void*))))) },
+        (sqlite_extension_metadata_list_scalar_function_spec_t) (sqlite_extension_metadata_list_scalar_function_spec_t) { (sqlite_extension_metadata_scalar_function_spec_t*)(*((uint8_t **) (ptr38 + (5*sizeof(void*))))), (*((size_t*) (ptr38 + (6*sizeof(void*))))) },
+        (sqlite_extension_metadata_list_aggregate_function_spec_t) (sqlite_extension_metadata_list_aggregate_function_spec_t) { (sqlite_extension_metadata_aggregate_function_spec_t*)(*((uint8_t **) (ptr38 + (7*sizeof(void*))))), (*((size_t*) (ptr38 + (8*sizeof(void*))))) },
+        (sqlite_extension_metadata_list_collation_spec_t) (sqlite_extension_metadata_list_collation_spec_t) { (sqlite_extension_metadata_collation_spec_t*)(*((uint8_t **) (ptr38 + (9*sizeof(void*))))), (*((size_t*) (ptr38 + (10*sizeof(void*))))) },
+        (bool) (int32_t) *((uint8_t*) (ptr38 + (11*sizeof(void*)))),
+        (bool) (int32_t) *((uint8_t*) (ptr38 + (1+11*sizeof(void*)))),
+        (bool) (int32_t) *((uint8_t*) (ptr38 + (2+11*sizeof(void*)))),
+        (sqlite_extension_metadata_list_capability_t) (sqlite_extension_metadata_list_capability_t) { (sqlite_extension_metadata_capability_t*)(*((uint8_t **) (ptr38 + (12*sizeof(void*))))), (*((size_t*) (ptr38 + (13*sizeof(void*))))) },
       };
       break;
     }
     case 1: {
       result.is_err = true;
       result.val.err = (sqlite_wasm_extension_loader_loader_error_t) {
-        (int32_t) *((int32_t*) (ptr + sizeof(void*))),
-        (sqlite_cli_unified_string_t) (sqlite_cli_unified_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (2*sizeof(void*))))), (*((size_t*) (ptr + (3*sizeof(void*))))) },
+        (int32_t) *((int32_t*) (ptr38 + sizeof(void*))),
+        (sqlite_cli_unified_string_t) (sqlite_cli_unified_string_t) { (uint8_t*)(*((uint8_t **) (ptr38 + (2*sizeof(void*))))), (*((size_t*) (ptr38 + (3*sizeof(void*))))) },
       };
       break;
     }
@@ -2335,12 +2417,12 @@ bool sqlite_wasm_extension_loader_unload_extension(sqlite_cli_unified_string_t *
   }
 }
 
-void sqlite_wasm_extension_loader_list_extensions(sqlite_wasm_extension_loader_list_extension_info_t *ret) {
+void sqlite_wasm_extension_loader_list_extensions(sqlite_wasm_extension_loader_list_manifest_t *ret) {
   __attribute__((__aligned__(sizeof(void*))))
   uint8_t ret_area[(2*sizeof(void*))];
   uint8_t *ptr = (uint8_t *) &ret_area;
   __wasm_import_sqlite_wasm_extension_loader_list_extensions(ptr);
-  *ret = (sqlite_wasm_extension_loader_list_extension_info_t) { (sqlite_wasm_extension_loader_extension_info_t*)(*((uint8_t **) (ptr + 0))), (*((size_t*) (ptr + sizeof(void*)))) };
+  *ret = (sqlite_wasm_extension_loader_list_manifest_t) { (sqlite_wasm_extension_loader_manifest_t*)(*((uint8_t **) (ptr + 0))), (*((size_t*) (ptr + sizeof(void*)))) };
 }
 
 bool sqlite_wasm_extension_loader_is_extension_loaded(sqlite_cli_unified_string_t *name) {

@@ -1,41 +1,48 @@
 // Extension Loader API
-// Allows dynamically loading and unloading WASM extension components
+//
+// Host-implemented dynamic loader for WASM extension components.
+// Imported by the sqlite-cli and sqlite-cli-unified worlds; the host
+// (wasmtime / jco / browser jco) supplies the implementation. When SQL
+// runs `.load /path/to/ext.wasm`, sqlite-cli calls into this interface,
+// the host reads the file, instantiates it, calls
+// `sqlite:extension/metadata.describe()` on the instance to obtain a
+// manifest, validates against any active policy, and registers the
+// manifest's entries with SQLite — then returns the same manifest the
+// describe call produced, so the SQL side sees the canonical shape
+// every other deployment path uses.
+//
+// Returning `manifest` (and accepting `load-options`) keeps the
+// dynamic-load and static-compose deployments speaking the same
+// vocabulary as the native loader in sqlite-wasm-loader: an extension
+// is fully described by its manifest, and a load is fully constrained
+// by its load-options. No bespoke loader-side type duplicates the
+// fields already in metadata.manifest.
 
 interface extension-loader {
-    // =========================================================================
-    // Extension Information
-    // =========================================================================
+    use sqlite:extension/metadata@0.1.0.{manifest};
+    use sqlite:extension/policy@0.1.0.{load-options};
 
-    /// Information about a loaded extension
-    record extension-info {
-        /// Name of the extension
-        name: string,
-        /// Version string
-        version: string,
-        /// List of SQL functions provided by this extension
-        functions: list<string>,
-    }
-
-    /// Error returned by loader operations
+    /// Errors the loader may raise (file not found, instantiate
+    /// failure, policy refusal, ...).
     record loader-error {
         code: s32,
         message: string,
     }
 
-    // =========================================================================
-    // Extension Loading
-    // =========================================================================
+    /// Load a WASM extension component from a host path under the
+    /// supplied policy. Returns the verified manifest on success — the
+    /// same shape produced by metadata.describe().
+    load-extension: func(
+        path: string,
+        options: load-options,
+    ) -> result<manifest, loader-error>;
 
-    /// Load a WASM extension component by path
-    /// Returns extension info on success
-    load-extension: func(path: string) -> result<extension-info, loader-error>;
-
-    /// Unload an extension by name
+    /// Unload a previously loaded extension by name.
     unload-extension: func(name: string) -> result<_, loader-error>;
 
-    /// List all currently loaded extensions
-    list-extensions: func() -> list<extension-info>;
+    /// List currently loaded extensions as their manifests.
+    list-extensions: func() -> list<manifest>;
 
-    /// Check if an extension is loaded
+    /// True iff an extension with the given name is currently loaded.
     is-extension-loaded: func(name: string) -> bool;
 }
