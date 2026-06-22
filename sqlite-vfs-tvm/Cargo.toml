@@ -34,8 +34,9 @@ sqlite-component-core = { path = "../core" }
 # parking_lot's Mutex is what core/host already pull in.
 parking_lot = "0.12"
 once_cell = "1"
-# Pull the guest-side tvm:memory imports from the shared
-# bindings crate. Inlining the wit_bindgen::generate! here
-# would produce a duplicate `encoded world` custom section in
-# the final wasm  see sqlite-tvm-bindings/src/lib.rs.
-sqlite-tvm-bindings = { path = "../sqlite-tvm-bindings" }
+# Guest-side multi-memory substrate. File bytes live in pool 2
+# of the `tvm-guest-mm` shell, accessed via dispatch helpers
+# (`tvm_copy_to_default`, `tvm_copy_from_default`, ...). The
+# `tvm-mm-link` step at sqlite-lib build time satisfies the
+# `tvm_mm.*` imports the helpers emit.
+tvm-guest-mm-rt = { path = "../../../tvm-wasm/crates/tvm-guest-mm-rt" }

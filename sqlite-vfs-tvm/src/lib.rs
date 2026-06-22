@@ -1,21 +1,21 @@
 //! Custom `sqlite3_vfs` implementation. Phase 4 of the TVM track
 //! in PLAN-tvm-integration.md.
 //!
-//! ## Layered plan
+//! ## Backend selection
 //!
-//! 1. **Phase 4.0 (this code):** trampolines + in-process
-//!    `Vec<u8>` storage + `install()` registering via
-//!    `sqlite3_vfs_register`. Registration is NOT
-//!    boot-order-constrained the way `sqlite3_config(...)` is,
-//!    so this can run at any point before the first
-//!    `sqlite3_open_v2` against our VFS name.
+//! Native builds use `storage::InProcStorage` (a `Vec<u8>` per
+//! file) so trampoline behavior is unit-testable without a wasm
+//! runtime. wasm32 builds use
+//! `multi_memory_storage::MultiMemoryStorage`: file bytes live
+//! in pool 2 of the `tvm-guest-mm` shell, accessed through the
+//! `tvm-guest-mm-rt` dispatch helpers. The `tvm-mm-link` step
+//! at sqlite-lib build time bakes the pool memories into the
+//! merged module.
 //!
-//! 2. **Phase 4.1 (deferred):** wit-bindgen-backed
-//!    `WitTvmStorage` plugging into the same `FileStorage`
-//!    trait. Gated on `target_arch = "wasm32"` +
-//!    `feature = "tvm"`, same shape as `sqlite-pcache-tvm`'s
-//!    `WitTvmRegion`. SQLite-facing trampolines don't change;
-//!    only the backend swap.
+//! Registration is NOT boot-order-constrained the way
+//! `sqlite3_config(...)` is, so `install()` / `install_as_default()`
+//! can run at any point before the first `sqlite3_open_v2`
+//! against our VFS name.
 //!
 //! ## Lifetime model
 //!
@@ -56,12 +56,14 @@ use parking_lot::Mutex;
 
 pub mod storage;
 
-// On wasm32 the file storage is always the wit-bindgen-backed
-// `tvm:memory` region  there's no reason to pick the in-proc
-// fallback when the target is wasm. The in-proc backend stays
-// available on native for the unit-test path.
+// On wasm32 the file storage is a multi-memory pool-backed
+// storage: file bytes live in pool 2 of the `tvm-guest-mm`
+// shell, accessed through the `tvm-guest-mm-rt` dispatch
+// helpers. The in-proc Vec<u8> backend stays the default on
+// native (where the pool helpers don't exist) for the
+// unit-test path.
 #[cfg(target_arch = "wasm32")]
-pub mod wit_tvm_storage;
+pub mod multi_memory_storage;
 
 use storage::FileStorage;
 
@@ -76,7 +78,7 @@ fn make_storage() -> Result<Box<dyn FileStorage>, c_int> {
 
 #[cfg(target_arch = "wasm32")]
 fn make_storage() -> Result<Box<dyn FileStorage>, c_int> {
-    match wit_tvm_storage::WitTvmStorage::new() {
+    match multi_memory_storage::MultiMemoryStorage::new() {
         Ok(s) => Ok(Box::new(s)),
         Err(_) => Err(ffi::SQLITE_IOERR),
     }

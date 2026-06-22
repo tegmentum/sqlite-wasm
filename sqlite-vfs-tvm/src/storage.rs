@@ -1,9 +1,11 @@
 //! File-storage abstraction. Each open VFS "file" maps to a
-//! `Box<dyn FileStorage>` here. Phase 4.0 ships the in-process
-//! `Vec<u8>` impl; Phase 4.1 will plug in a `WitTvmStorage`
-//! backed by `tvm:memory` regions, behind a cargo feature
-//! exactly the same shape as `sqlite-pcache-tvm`'s
-//! `region::Region` / `wit_tvm_region::WitTvmRegion` split.
+//! `Box<dyn FileStorage>` here. Native builds use the in-process
+//! `InProcStorage` (a growable `Vec<u8>`); wasm32 builds use the
+//! sibling `multi_memory_storage::MultiMemoryStorage`, which
+//! addresses bytes in pool 2 of the `tvm-guest-mm` shell via
+//! `tvm-guest-mm-rt`'s dispatch helpers. Same split shape as
+//! sqlite-pcache-tvm's `region::Region` /
+//! `multi_memory_region::MultiMemoryRegion`.
 
 use libsqlite3_sys as ffi;
 
