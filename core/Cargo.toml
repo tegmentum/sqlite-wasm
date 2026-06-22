@@ -1,0 +1,29 @@
+[package]
+name = "sqlite-component-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Shared SQLite wrapper for sqlink crates (cli + sqlite-lib)."
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# libsqlite3-sys provides raw FFI to sqlite3.c (bundled compiles
+# it via the cc crate against wasm32-wasip2). The downstream crates
+# build for wasm32-wasip2 so the build env needs CC_wasm32_wasip2 to
+# point at the wasi-sdk clang.
+# NB: SESSION is enabled via LIBSQLITE3_FLAGS in .cargo/config.toml
+# at the C level. The libsqlite3-sys `session` feature would forward
+# bindings but it requires buildtime_bindgen which fails to
+# cross-compile to wasm32-wasip2 (~97 missing-symbol errors in the
+# generated bindings). Callers needing sqlite3session_* / sqlite3changeset_*
+# declare them as `extern "C"` directly  see host/src/main.rs and
+# cli/src/dot.rs.
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
+
+[build-dependencies]
+# Used to compile src/vfs/vfs_wasi.c on wasm32 targets so SQLite's
+# file-backed opens hit a WASI VFS that actually writes to disk,
+# instead of falling back to libsqlite3-sys's in-memory default.
+cc = "1"

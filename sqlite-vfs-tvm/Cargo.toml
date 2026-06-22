@@ -1,0 +1,41 @@
+[package]
+name = "sqlite-vfs-tvm"
+version = "0.1.0"
+edition = "2021"
+description = """
+Custom `sqlite3_vfs` implementation. Phase 4 of the TVM track in
+PLAN-tvm-integration.md.
+
+First-commit scope (Phase 4.0): the sqlite3_vfs +
+sqlite3_io_methods trampolines and an `install()` that registers
+via `sqlite3_vfs_register`. Backend is an in-process Vec<u8>
+per "file"  the TVM-backed variant (sibling to
+sqlite-pcache-tvm's WitTvmRegion) is Phase 4.1.
+
+The intent: when registered as the default VFS, `Connection::open
+("/anywhere/anything.db", ...)` routes every byte through this
+crate. SQLite treats each path as a file; we hold the bytes in
+memory (Phase 4.0) or in a TVM region (Phase 4.1). With
+`PRAGMA temp_store = FILE`, sort/hash spill flows through too.
+That's the > 4 GiB story for non-page bytes.
+"""
+license = "MIT"
+
+[dependencies]
+# Same libsqlite3-sys version core/cli use. NOT bundled  the
+# bundled compile lives in core; cargo's `links =` uniqueness
+# rule forbids two crates from declaring it.
+libsqlite3-sys = { version = "0.38", default-features = false }
+# core brings in the bundled sqlite3 build; transitively linking
+# it satisfies our extern symbols.
+sqlite-component-core = { path = "../core" }
+# Used for the shared file table + per-file storage  the table
+# is a Mutex<HashMap<String, Arc<Mutex<dyn FileStorage>>>>, and
+# parking_lot's Mutex is what core/host already pull in.
+parking_lot = "0.12"
+once_cell = "1"
+# Pull the guest-side tvm:memory imports from the shared
+# bindings crate. Inlining the wit_bindgen::generate! here
+# would produce a duplicate `encoded world` custom section in
+# the final wasm  see sqlite-tvm-bindings/src/lib.rs.
+sqlite-tvm-bindings = { path = "../sqlite-tvm-bindings" }

@@ -1,0 +1,10 @@
+target/
+host/target/
+extensions/_shared-target/
+Cargo.lock
+__pycache__/
+.cargo/config.toml
+**/.cargo/config.toml
+.DS_Store
+*.swp
+*~

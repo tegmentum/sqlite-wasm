@@ -1,0 +1,32 @@
+[package]
+name = "sqlite-pcache-tvm"
+version = "0.1.0"
+edition = "2021"
+description = """
+Custom `sqlite3_pcache_methods2` implementation that will route
+SQLite's page cache through a TVM (tvm-wasm) page-store region,
+unlocking working sets larger than wasm32's 4 GiB ceiling. See
+PLAN-tvm-integration.md.
+
+First-commit scope: the registration plumbing + a HashMap-backed
+cache that exercises the eleven `sqlite3_pcache_methods2`
+trampolines. The TVM `page-store` region backend swaps in for the
+HashMap in the follow-up commit; the SQLite-facing surface is
+already correct from this commit, so backend swap is contained.
+"""
+license = "MIT"
+
+[dependencies]
+# Same libsqlite3-sys version core/cli use. NOT bundled  the
+# bundled compile lives in core, and cargo's `links =`
+# uniqueness rule forbids two crates from declaring it. This crate
+# just needs the type/binding surface, not the C compile.
+libsqlite3-sys = { version = "0.38", default-features = false }
+# core is what brings in the bundled sqlite3 build; transitively
+# linking it satisfies our extern symbols.
+sqlite-component-core = { path = "../core" }
+# Pull the guest-side tvm:memory imports from the shared
+# bindings crate. Inlining the wit_bindgen::generate! here
+# would produce a duplicate `encoded world` custom section in
+# the final wasm  see sqlite-tvm-bindings/src/lib.rs.
+sqlite-tvm-bindings = { path = "../sqlite-tvm-bindings" }

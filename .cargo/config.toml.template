@@ -1,0 +1,69 @@
+# Workspace-level cargo config. Deliberately NO `[build] target`
+# setting — that would force the native host crate to target wasm
+# from the root invocation. The per-crate `.cargo/config.toml` in
+# `cli/` and `sqlite-lib/` override this and set
+# `target = "wasm32-wasip2"` so `cd cli && cargo build` Just Works.
+#
+# The env vars + linker config below are needed by the wasm-targeted
+# crates. They sit at workspace root so explicit `cargo build -p
+# sqlite-cli --target wasm32-wasip2` from this directory also works
+# without each crate duplicating the values. Per-crate configs
+# layer additively over this.
+
+[env]
+CC_wasm32_wasip2 = "__WASI_SDK_PATH__/bin/clang"
+AR_wasm32_wasip2 = "__WASI_SDK_PATH__/bin/ar"
+# -msimd128 enables WebAssembly SIMD (v128 ops) for clang-compiled C
+# code  bundled sqlite3.c (libsqlite3-sys), wasivfs, embed extensions
+# that link C. SIMD is a wasmtime baseline feature; emitting it costs
+# nothing at runtime and lets clang's auto-vectorizer hit memcpy /
+# memcmp / strlen / hash inner loops.
+CFLAGS_wasm32_wasip2 = "--sysroot=__WASI_SDK_PATH__/share/wasi-sysroot -target wasm32-wasip2 -msimd128"
+# Extra defines threaded into libsqlite3-sys's bundled compile.
+# libsqlite3-sys 0.30.1's build.rs honors LIBSQLITE3_FLAGS for
+# extra -D/-U flags. The bundled flag set covers FTS5 + RTREE +
+# JSON1 + a few others; everything below extends what ships
+# turned on by default.
+#
+#   GEOPOLY        polygon spatial index (CREATE VIRTUAL TABLE
+#                  ... USING geopoly())
+#   DBSTAT_VTAB    page-level diagnostics (SELECT * FROM dbstat)
+#   STMTVTAB       runtime statement enumeration
+#                  (SELECT sql FROM sqlite_stmt)
+#   BYTECODE_VTAB  query plan introspection (SELECT * FROM
+#                  bytecode('SELECT ...'))
+#   SESSION /      changeset/patchset primitives
+#   PREUPDATE_HOOK (sqlite3_session_*, requires the preupdate
+#                  hook to capture pre-image rows)
+#
+# Perf knobs (PLAN-perf-defaults):
+#   DEFAULT_MEMSTATUS=0     skip per-alloc hit counter; cli never reads
+#                           sqlite3_status()
+#   THREADSAFE=0            single-threaded wasm; skip mutex machinery
+#   LIKE_DOESNT_MATCH_BLOBS skip the BLOB-LIKE branch on every LIKE eval
+#   MAX_EXPR_DEPTH=0        skip per-expression recursion-depth tracking
+#   (OMIT_DECLTYPE is incompatible with the COLUMN_METADATA libsqlite3-sys
+#    bakes in; dropped)
+# Round-2 perf knobs (added 2026-06):
+#   OMIT_DEPRECATED         skip the deprecated-API stubs (compile-time
+#                           win; no runtime impact unless an extension
+#                           actually called one of them, which none do)
+#   DEFAULT_AUTOMATIC_INDEX=0 skip the planner's auto-index decision
+#                           on every join; users can still PRAGMA
+#                           automatic_index=ON for the rare case
+#   USE_ALLOCA              put small temporaries on the wasm stack
+#                           instead of through sqlite3_malloc; saves
+#                           allocator traffic in the parser hot loop
+#   (OMIT_TRACE looked like a win but the cli uses sqlite3_trace_v2 for
+#    its statement-trace dot-command  dropped)
+LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_GEOPOLY -DSQLITE_ENABLE_DBSTAT_VTAB -DSQLITE_ENABLE_STMTVTAB -DSQLITE_ENABLE_BYTECODE_VTAB -DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK -DSQLITE_ENABLE_DESERIALIZE -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_THREADSAFE=0 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_DEFAULT_AUTOMATIC_INDEX=0 -DSQLITE_USE_ALLOCA"
+
+[target.wasm32-wasip2]
+linker = "rust-lld"
+# +simd128 lets rustc emit WebAssembly SIMD v128 ops (auto-
+# vectorized iter loops, std::simd, manual std::arch::wasm32
+# intrinsics in vec0 kernels, etc). Cost: zero  wasmtime supports
+# SIMD as a baseline feature; emitting it doesn't break older
+# runtimes that lack support either because we already target
+# wasm32-wasip2 which mandates the post-1.0 wasm feature set.
+rustflags = ["-C", "link-arg=--no-entry", "-C", "target-feature=+simd128"]

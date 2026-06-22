@@ -1,0 +1,26 @@
+[package]
+name = "sqlite-mem-tvm"
+version = "0.1.0"
+edition = "2021"
+description = """
+Custom `sqlite3_mem_methods` implementation. Phase 2 of the TVM
+track in PLAN-tvm-integration.md.
+
+First-commit scope: the seven `sqlite3_mem_methods` trampolines
+(xMalloc / xFree / xRealloc / xSize / xRoundup / xInit /
+xShutdown), a size-header allocator backend, and an `install()`
+that registers via `sqlite3_config(SQLITE_CONFIG_MALLOC, ...)`
+before `sqlite3_initialize`. The full TVM-backed variant is
+gated on a structural TVM API change  see the Phase 2 finding
+in PLAN-tvm-integration.md.
+"""
+license = "MIT"
+
+[dependencies]
+# Same libsqlite3-sys version core/cli use. NOT bundled  the
+# bundled compile lives in core; cargo's `links =` uniqueness
+# rule forbids two crates from declaring it.
+libsqlite3-sys = { version = "0.38", default-features = false }
+# core brings in the bundled sqlite3 build; transitively linking
+# it satisfies our extern symbols.
+sqlite-component-core = { path = "../core" }

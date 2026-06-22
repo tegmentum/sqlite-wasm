@@ -1,0 +1,29 @@
+[package]
+name = "sqlite-tvm-bindings"
+version = "0.1.0"
+edition = "2021"
+description = """
+Single point of `wit_bindgen::generate!` for the `tvm:memory`
+package. The `sqlite-pcache-tvm` and `sqlite-vfs-tvm` crates both
+need the tvm-guest bindings; if each invoked the macro
+separately, wit-bindgen would emit the same encoded-world custom
+section twice in the final cli wasm, which wasm-tools 1.252
+flatly rejects ("expected section, got wasm magic number"). One
+crate, one section.
+
+Keeping the WIT in this crate's own `wit/` (instead of pointing
+the macro path back at `sqlite-pcache-tvm/wit`) means consumers
+don't get cargo's path-deps-recompile-on-WIT-edit confusion.
+"""
+license = "MIT"
+
+[lib]
+name = "sqlite_tvm_bindings"
+path = "src/lib.rs"
+
+[dependencies]
+# The macro generates code that calls into wit-bindgen-rt; the
+# version pair has to track each other across all crates pulling
+# in `tvm:memory` bindings.
+wit-bindgen = { version = "0.45", features = ["macros"] }
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }

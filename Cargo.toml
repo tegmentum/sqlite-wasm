@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+
+# Componentized SQLite + WASI Preview 2 building blocks. Each
+# crate is a deliberately small, independently-usable layer.
+# Consumers (sqlink and others) take the whole set as a submodule
+# or a sibling checkout and depend on individual crates via path.
+members = [
+    "core",
+    "sqlite-embed",
+    "sqlite-pcache-tvm",
+    "sqlite-mem-tvm",
+    "sqlite-vfs-tvm",
+    "sqlite-tvm-bindings",
+]
+
+# `cargo build` at the workspace root operates on native targets
+# (core's libsqlite3-sys-backed wrapper). The wasm crates
+# (sqlite-lib, sqlite-embed, the TVM modules) are workspace
+# members so they share the lockfile, but need
+# `--target wasm32-wasip2` and the wasi-sdk env to actually
+# build. See README + scripts/setup-cargo-config.sh.
+default-members = ["core"]
