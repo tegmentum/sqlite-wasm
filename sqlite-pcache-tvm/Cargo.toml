@@ -25,8 +25,10 @@ libsqlite3-sys = { version = "0.38", default-features = false }
 # core is what brings in the bundled sqlite3 build; transitively
 # linking it satisfies our extern symbols.
 sqlite-component-core = { path = "../core" }
-# Pull the guest-side tvm:memory imports from the shared
-# bindings crate. Inlining the wit_bindgen::generate! here
-# would produce a duplicate `encoded world` custom section in
-# the final wasm  see sqlite-tvm-bindings/src/lib.rs.
-sqlite-tvm-bindings = { path = "../sqlite-tvm-bindings" }
+# Guest-side multi-memory substrate. Replaces the legacy
+# wit-bindgen-backed `tvm:memory` interface; cold pages live in
+# a non-default wasm memory pool, accessed via dispatch helpers
+# (`tvm_load_*`, `tvm_copy_to_default`, ...). The `tvm-mm-link`
+# static-linker step at sqlite-lib build time satisfies the
+# `tvm_mm.*` imports the helpers emit.
+tvm-guest-mm-rt = { path = "../../../tvm-wasm/crates/tvm-guest-mm-rt" }

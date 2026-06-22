@@ -1,11 +1,16 @@
 //! Cold-storage abstraction. The Path D cache hot-fetches pages
 //! from a region into bounded default-memory shadow slots and
 //! flushes them back on unpin. The region is whatever survives
-//! beyond the shadow pool — Phase 1.1's default is an in-process
-//! `HashMap<u32, Vec<u8>>` so we can unit-test the eviction +
-//! flush logic without a TVM host. Behind the `tvm` cargo feature,
-//! a `tvm:memory`-backed region will plug in via the same trait
-//! (follow-up commit; the trait shape is the integration point).
+//! beyond the shadow pool. Two implementations:
+//!
+//! - `InProcRegion` — in-process `HashMap<u32, Vec<u8>>`, used
+//!   on native targets so we can unit-test the eviction + flush
+//!   logic without a wasm runtime.
+//! - `MultiMemoryRegion` (sibling module, wasm32 only) — page
+//!   bytes live in pool 1 of the `tvm-guest-mm` shell, accessed
+//!   through `tvm-guest-mm-rt`'s dispatch helpers. The
+//!   `tvm-mm-link` step at sqlite-lib build time bakes the pool
+//!   memories into the merged module.
 //!
 //! Region addressing is `key * sz_page` — the SQLite page key
 //! becomes the byte offset. `xRekey` does an in-region `copy`
@@ -41,8 +46,9 @@ impl std::error::Error for RegionError {}
 /// async-capable variant would need a different cache shape.
 ///
 /// Implementations: see `InProcRegion` (the in-process Vec<u8>
-/// backed default for testing and the no-feature build) and the
-/// forthcoming `WitTvmRegion` (gated on `feature = "tvm"`).
+/// backed default for the native unit-test path) and
+/// `MultiMemoryRegion` (the wasm32 default — pool-1 of the
+/// `tvm-guest-mm` shell, addressed through dispatch helpers).
 pub trait Region: Send {
     /// Read `len` bytes at `offset`. Returning `Ok(None)` means
     /// "no data has ever been written at that offset"; the cache

@@ -8,16 +8,14 @@
 //!
 //! ## Backend selection
 //!
-//! The default build uses `region::InProcRegion` (`HashMap<u32,
-//! Vec<u8>>` keyed by `key * sz_page`) — same memory budget as
-//! before Phase 1.1, but now goes through the full shadow-pool
-//! machinery so the eviction + flush paths are exercised in
-//! every build. The `tvm` cargo feature swaps in a wit-bindgen-
-//! backed region against `tvm:memory@0.1.0`; that backend is the
-//! Path D destination state. For now, building with `--features
-//! tvm` is wasm32-only (the wit-bindgen guest code is wasm32-
-//! only), and the host-side test of that path lives in the
-//! follow-up commit.
+//! Native builds use `region::InProcRegion` (`HashMap<u32,
+//! Vec<u8>>` keyed by `key * sz_page`) so the eviction + flush
+//! paths are unit-testable without a wasm runtime. wasm32
+//! builds use `multi_memory_region::MultiMemoryRegion`: page
+//! bytes live in pool 1 of the `tvm-guest-mm` shell, accessed
+//! through the `tvm-guest-mm-rt` dispatch helpers. The
+//! `tvm-mm-link` step at sqlite-lib build time bakes the pool
+//! memories into the merged module.
 //!
 //! ## Registration
 //!
@@ -60,16 +58,18 @@ pub fn cache_diagnostics() -> (u32, u32, u32, u32) {
 pub mod cache;
 pub mod region;
 
-// On wasm32 the cold tier is always the wit-bindgen-backed
-// `tvm:memory` region  there's no reason to pick the in-proc
-// fallback when the target is wasm. The in-proc backend stays
-// available on native (where the wit-bindgen extern blocks
-// wouldn't link anyway) for the unit-test path.
+// On wasm32 the cold tier is the multi-memory pool-backed
+// region — page bytes live in pool 1 of the tvm-guest-mm shell,
+// addressed through the `tvm-guest-mm-rt` dispatch helpers. The
+// in-proc HashMap backend stays the default on native (where the
+// pool helpers don't exist and would be no-ops anyway), giving
+// `cargo test` a backend that works without the multi-memory
+// substrate.
 #[cfg(target_arch = "wasm32")]
-pub mod wit_tvm_region;
+pub mod multi_memory_region;
 
 #[cfg(target_arch = "wasm32")]
-type ActiveRegion = wit_tvm_region::WitTvmRegion;
+type ActiveRegion = multi_memory_region::MultiMemoryRegion;
 #[cfg(not(target_arch = "wasm32"))]
 type ActiveRegion = region::InProcRegion;
 
