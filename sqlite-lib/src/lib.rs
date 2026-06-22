@@ -57,6 +57,32 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::new());
 }
 
+/// Install the wasm32 cold-tier providers (multi-memory pcache
+/// + multi-memory VFS) exactly once, before any
+/// `db::Connection::open*` call lands. Pcache install order is
+/// load-bearing: SQLite requires `SQLITE_CONFIG_PCACHE2` to be
+/// set before `sqlite3_initialize` (which is implicitly fired
+/// by the first connection). VFS registration is order-free,
+/// so we register but do NOT make it the default — the WASI VFS
+/// stays default so file paths still route through the host's
+/// `wasi:filesystem`. Browser-side composition (which has no
+/// wasi:filesystem) flips the default later via
+/// `sqlite_vfs_tvm::install_as_default`.
+///
+/// On native targets the cold-tier install calls are no-ops
+/// (both crates fall back to their in-proc implementations).
+#[cfg(target_arch = "wasm32")]
+fn tvm_cold_tier_init() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = sqlite_pcache_tvm::install();
+        let _ = sqlite_vfs_tvm::install();
+    });
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn tvm_cold_tier_init() {}
+
 struct SqliteLib;
 
 // =========================================================================
@@ -146,10 +172,26 @@ thread_local! {
         = const { RefCell::new(None) };
 }
 
+/// Shim around `db::Connection::open*` that runs the wasm32
+/// cold-tier install path (pcache2 + VFS register) exactly once
+/// before SQLite gets initialized. Native builds skip the
+/// install; wasm32 builds make sure pcache2 is wired before
+/// the implicit `sqlite3_initialize` the first connection
+/// triggers.
+fn open_in_memory_with_init() -> Result<db::Connection, db::Error> {
+    tvm_cold_tier_init();
+    db::Connection::open_in_memory()
+}
+fn open_with_init(path: &str, flags: db::OpenFlags) -> Result<db::Connection, db::Error> {
+    tvm_cold_tier_init();
+    db::Connection::open(path, flags)
+}
+
 fn shared_conn() -> std::rc::Rc<RefCell<db::Connection>> {
     SHARED_CONN.with(|c| {
         let mut g = c.borrow_mut();
         if g.is_none() {
+            tvm_cold_tier_init();
             let conn = db::Connection::open_in_memory()
                 .expect("open in-memory connection for shared SPI/high-level default");
             *g = Some(std::rc::Rc::new(RefCell::new(conn)));
@@ -268,8 +310,7 @@ impl SpiGuest for SqliteLib {
         dst_path: String,
         dst_db: String,
     ) -> Result<(), SpiSqliteError> {
-        let dst = db::Connection::open(&dst_path, db::OpenFlags::DEFAULT)
-            .map_err(spi_db_err)?;
+        let dst = open_with_init(&dst_path, db::OpenFlags::DEFAULT).map_err(spi_db_err)?;
         spi_with(|src| src.backup_into(&src_db, &dst, &dst_db).map_err(spi_db_err))
     }
 
@@ -278,8 +319,7 @@ impl SpiGuest for SqliteLib {
         src_db: String,
         dst_db: String,
     ) -> Result<(), SpiSqliteError> {
-        let src = db::Connection::open(&src_path, db::OpenFlags::READONLY)
-            .map_err(spi_db_err)?;
+        let src = open_with_init(&src_path, db::OpenFlags::READONLY).map_err(spi_db_err)?;
         spi_with(|dst| src.backup_into(&src_db, dst, &dst_db).map_err(spi_db_err))
     }
 
@@ -355,9 +395,9 @@ impl SpiGuest for SqliteLib {
         // Swap the shared SPI connection. Empty path / `:memory:` opens
         // a fresh in-memory db; anything else is a file path.
         let new_conn = if path.is_empty() || path == ":memory:" {
-            db::Connection::open_in_memory().map_err(spi_db_err)?
+            open_in_memory_with_init().map_err(spi_db_err)?
         } else {
-            db::Connection::open(&path, db::OpenFlags::DEFAULT).map_err(spi_db_err)?
+            open_with_init(&path, db::OpenFlags::DEFAULT).map_err(spi_db_err)?
         };
         SHARED_CONN.with(|c| {
             *c.borrow_mut() = Some(std::rc::Rc::new(RefCell::new(new_conn)));
@@ -409,9 +449,9 @@ impl LowLevelGuest for SqliteLib {
             filename
         };
         let conn = if path == ":memory:" {
-            db::Connection::open_in_memory()
+            open_in_memory_with_init()
         } else {
-            db::Connection::open(&path, ll_open_flags(flags))
+            open_with_init(&path, ll_open_flags(flags))
         };
         match conn {
             Ok(c) => Ok(STATE.with(|s| s.borrow_mut().add_db(c))),
@@ -571,13 +611,13 @@ impl HighLevelGuest for SqliteLib {
     fn version() -> String { db::version() }
     fn version_number() -> i32 { db::version_number() }
     fn open_memory() -> Result<Connection, HlDatabaseError> {
-        match db::Connection::open_in_memory() {
+        match open_in_memory_with_init() {
             Ok(c) => Ok(Connection::new(HlConnection { conn: std::rc::Rc::new(RefCell::new(c)) })),
             Err(e) => Err(hl_err(&e)),
         }
     }
     fn open_file(path: String) -> Result<Connection, HlDatabaseError> {
-        match db::Connection::open(&path, db::OpenFlags::DEFAULT) {
+        match open_with_init(&path, db::OpenFlags::DEFAULT) {
             Ok(c) => Ok(Connection::new(HlConnection { conn: std::rc::Rc::new(RefCell::new(c)) })),
             Err(e) => Err(hl_err(&e)),
         }
@@ -593,13 +633,13 @@ impl HighLevelGuest for SqliteLib {
 impl GuestConnection for HlConnection {
     fn new(path: String, mode: OpenMode) -> Self {
         let conn = match mode {
-            OpenMode::Memory => db::Connection::open_in_memory(),
-            OpenMode::ReadOnly => db::Connection::open(&path, db::OpenFlags::READONLY),
-            _ => db::Connection::open(&path, db::OpenFlags::DEFAULT),
+            OpenMode::Memory => open_in_memory_with_init(),
+            OpenMode::ReadOnly => open_with_init(&path, db::OpenFlags::READONLY),
+            _ => open_with_init(&path, db::OpenFlags::DEFAULT),
         };
         HlConnection {
             conn: std::rc::Rc::new(RefCell::new(
-                conn.unwrap_or_else(|_| db::Connection::open_in_memory().unwrap()),
+                conn.unwrap_or_else(|_| open_in_memory_with_init().unwrap()),
             )),
         }
     }

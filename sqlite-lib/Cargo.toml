@@ -18,6 +18,14 @@ sqlite-component-core = { path = "../core" }
 # Direct libsqlite3-sys reference for sqlite3_complete + SQLITE_*
 # action codes used by the in-WASM authorizer dispatch.
 libsqlite3-sys = { version = "0.38" }
+# Cold-tier providers. On wasm32 these route SQLite's page cache
+# and (optionally) its VFS through pool 1 / pool 2 of the
+# `tvm-guest-mm` shell, blowing past the wasm32 4 GiB ceiling.
+# `tvm_cold_tier_init()` calls into both crates' `install()`
+# entry points exactly once before the first
+# `db::Connection::open`.
+sqlite-pcache-tvm = { path = "../sqlite-pcache-tvm" }
+sqlite-vfs-tvm = { path = "../sqlite-vfs-tvm" }
 
 # Component packaging mirrors the cli crate:
 #   cargo build --release --target wasm32-wasip2
