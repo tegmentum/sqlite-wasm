@@ -1,0 +1,134 @@
+// High-level resource-based SQLite API
+// Provides ergonomic, safe abstractions over the low-level bindings
+
+interface high-level {
+    // SQLite value variant
+    variant value {
+        null,
+        integer(s64),
+        real(f64),
+        text(string),
+        blob(list<u8>),
+    }
+
+    // Error information
+    record database-error {
+        code: s32,
+        extended-code: s32,
+        message: string,
+    }
+
+    // Row data
+    record row {
+        columns: list<value>,
+    }
+
+    // Query results
+    record query-result {
+        column-names: list<string>,
+        rows: list<row>,
+    }
+
+    // Execution result (for INSERT/UPDATE/DELETE)
+    record exec-result {
+        changes: s32,
+        last-insert-rowid: s64,
+    }
+
+    // Open mode options
+    enum open-mode {
+        read-only,
+        read-write,
+        read-write-create,
+        memory,
+    }
+
+    // Connection resource
+    resource connection {
+        // Open a database connection
+        constructor(path: string, mode: open-mode);
+
+        // Execute SQL without returning rows (for CREATE, INSERT, UPDATE, DELETE)
+        execute: func(sql: string) -> result<exec-result, database-error>;
+
+        // Execute SQL with parameters
+        execute-with-params: func(sql: string, params: list<value>) -> result<exec-result, database-error>;
+
+        // Execute a query and return all rows
+        query: func(sql: string) -> result<query-result, database-error>;
+
+        // Execute a query with parameters
+        query-with-params: func(sql: string, params: list<value>) -> result<query-result, database-error>;
+
+        // Prepare a statement for repeated execution
+        prepare: func(sql: string) -> result<statement, database-error>;
+
+        // Transaction control
+        begin-transaction: func() -> result<_, database-error>;
+        commit: func() -> result<_, database-error>;
+        rollback: func() -> result<_, database-error>;
+
+        // Check if in autocommit mode (no active transaction)
+        in-autocommit: func() -> bool;
+
+        // Get the last error message
+        last-error: func() -> option<database-error>;
+    }
+
+    // Prepared statement resource
+    resource statement {
+        // Bind parameters by position (1-indexed)
+        bind: func(index: s32, value: value) -> result<_, database-error>;
+
+        // Bind all parameters at once
+        bind-all: func(params: list<value>) -> result<_, database-error>;
+
+        // Execute the statement (for INSERT/UPDATE/DELETE)
+        execute: func() -> result<exec-result, database-error>;
+
+        // Execute as a query and return all rows
+        query: func() -> result<query-result, database-error>;
+
+        // Step through results one row at a time
+        step: func() -> result<option<row>, database-error>;
+
+        // Reset the statement for re-execution
+        reset: func() -> result<_, database-error>;
+
+        // Clear all bindings
+        clear-bindings: func() -> result<_, database-error>;
+
+        // Get column information
+        column-count: func() -> s32;
+        column-names: func() -> list<string>;
+
+        // Get parameter count
+        parameter-count: func() -> s32;
+    }
+
+    // Utility functions
+
+    // Get SQLite library version string
+    version: func() -> string;
+
+    // Get SQLite library version number
+    version-number: func() -> s32;
+
+    // Open an in-memory database (convenience function)
+    open-memory: func() -> result<connection, database-error>;
+
+    // Open a file database with default settings (convenience function)
+    open-file: func(path: string) -> result<connection, database-error>;
+
+    /// Hand out a connection resource backed by the same sqlite3
+    /// connection that the component's `sqlite:extension/spi`
+    /// surface reads from and writes to. Use this when the SPI
+    /// surface and the high-level surface need to see each other's
+    /// writes — e.g. a consumer that uses high-level for schema
+    /// setup and an embedded extension for queries. Connections
+    /// obtained via `open-memory` / `open-file` / `connection.new`
+    /// are isolated from SPI; only this default connection is
+    /// shared. The default connection is created on first call and
+    /// lives for the lifetime of the component instance.
+    default-connection: func() -> result<connection, database-error>;
+}

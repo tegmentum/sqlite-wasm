@@ -1,0 +1,120 @@
+package sqlink:wasm@0.1.0;
+
+/// SQLite-in-WASM with the unified sqlite:extension contract.
+///
+/// Targeted by the C CLI binary `build/sqlite-cli-unified.wasm`
+/// (built from `src/cli/sqlite_cli.c` via the Makefile's
+/// `bindings-unified` target). The host (sqlink itself,
+/// internally) calls each composed extension's per-slot
+/// `describe()` at startup, registers the manifest entries with
+/// SQLite, and dispatches by calling the slot's `call()` when SQL
+/// invokes a function — declarative dispatch in contrast to the
+/// imperative `register-scalar-function` flow of older C builds.
+///
+/// Exports:
+///   - low-level / high-level — SQLite's own API
+///   - sqlite:extension/types — sql-value variant + associated enums
+///   - sqlite:extension/spi — execute / execute-scalar / execute-batch
+///     so composed extensions can run SQL
+///   - sqlite:extension/logging — structured logging from extensions
+///   - sqlite:extension/config — version / config lookups
+///
+/// Imports:
+///   - Per-extension slot interfaces (fts5-slot, json1-slot,
+///     rtree-slot, geopoly-slot). Each slot is structurally identical
+///     to `metadata.describe + scalar-function.call` but has a
+///     distinct identity so `wasm-tools compose -d <name>=...` and
+///     `wac compose` can wire each composed extension to its own
+///     dispatch port. Unwired slots mean the extension isn't included
+///     in this binary; the host tolerates this.
+///   - extension-loader — host-implemented dynamic load (.load)
+///   - zip-operations — host-implemented .archive support
+///
+world sqlite-cli-unified {
+    export low-level;
+    export high-level;
+
+    export sqlite:extension/types@0.1.0;
+    export sqlite:extension/spi@0.1.0;
+    export sqlite:extension/logging@0.1.0;
+    export sqlite:extension/config@0.1.0;
+
+    import fts5-slot;
+    import json1-slot;
+    import rtree-slot;
+    import geopoly-slot;
+    import demo-slot;
+
+    import extension-loader;
+    import dispatch;
+    import zip-operations;
+}
+
+/// Command-mode CLI. The component owns its own REPL via
+/// `wasi:cli/run`: any wasi:p2 host (wasmtime, jco, our polyfill
+/// in the browser) can run it with no special host plumbing
+/// beyond the extension-loader / dispatch imports we provide for
+/// the dynamic-load story.
+///
+/// Successor to `sqlite-cli-reactor`, which had a six-method
+/// interactive interface the host drove turn-by-turn. The reactor
+/// was originally chosen to enable live-SPI bridge re-entry; that
+/// route was architecturally impossible (see
+/// `host/SPI-LIVE-ARCHITECTURE.md`) and the pattern's costs
+/// (split state, async lifts, six methods coordinating across the
+/// host/guest boundary) bought us nothing. Command-mode is the
+/// honest shape.
+///
+/// Programmatic / library use ("eval this SQL, give me rows")
+/// belongs in a separate `sqlite-library` world targeted by a
+/// distinct crate. This world is just a CLI.
+world sqlite-cli-command {
+    include wasi:cli/command@0.2.6;
+
+    import extension-loader;
+    import dispatch;
+    /// Stage 1 of PLAN-cli-shared-conn.md: the cli world now
+    /// imports the same SQL surface extensions use. Today
+    /// (Stage 1) the cli still owns its own CLI_CONN via
+    /// libsqlite3-sys and uses these imports for nothing
+    /// the host wires them in so subsequent stages can migrate
+    /// eval_sql + dot.rs callers off the local connection one
+    /// path at a time.
+    import sqlite:extension/spi@0.1.0;
+    import sqlite:extension/spi-loader@0.1.0;
+    import sqlite:extension/prepared@0.1.0;
+    import sqlite:extension/session@0.1.0;
+}
+
+/// Programmatic SQLite library world.
+///
+/// Targeted by the sqlite-lib crate. Use this when you want SQLite
+/// functionality as a callable WIT surface from another component
+/// (a runnable component, a web frontend, an SPI consumer) rather than
+/// as a CLI you drive over stdin. Exports both:
+///
+///   - the complete SPI surface (so a composed extension can use
+///     this component as its SQL backend at compose time), and
+///   - a sugar interface (`high-level`'s Connection / Statement
+///     resources) for callers that prefer ergonomic Rust-style
+///     calls over raw `execute(sql, params)`.
+///
+/// A small `library` interface ties in REPL utilities, version
+/// queries, and a programmatic `load-extension` path.
+///
+/// Imports the standard `extension-loader` and `dispatch`. Callers
+/// that don't need dynamic loading can satisfy `extension-loader`
+/// with a stub.
+world sqlite-library {
+    export sqlite:extension/types@0.1.0;
+    export sqlite:extension/spi@0.1.0;
+    export sqlite:extension/logging@0.1.0;
+    export sqlite:extension/config@0.1.0;
+
+    export low-level;
+    export high-level;
+    export library;
+
+    import extension-loader;
+    import dispatch;
+}

@@ -1,0 +1,346 @@
+// Extension Loader API
+//
+// Host-implemented dynamic loader for WASM extension components.
+// Imported by every world that wants `.load` to work — today that's
+// `sqlite-cli-command` and `sqlite-library` (Rust) plus
+// `sqlite-cli-unified` (C). The host (wasmtime / jco / browser
+// jco) supplies the implementation. When SQL runs
+// `.load /path/to/ext.wasm`, the consumer calls into this
+// interface, the host reads the file, instantiates it, calls
+// `sqlite:extension/metadata.describe()` on the instance to obtain
+// a manifest, validates against any active policy, and registers
+// the manifest's entries with SQLite — then returns the same
+// manifest the describe call produced, so the SQL side sees the
+// canonical shape every other deployment path uses.
+//
+// Returning `manifest` (and accepting `load-options`) keeps the
+// dynamic-load and static-compose deployments speaking the same
+// vocabulary as the native loader in sqlink-loader: an extension
+// is fully described by its manifest, and a load is fully constrained
+// by its load-options. No bespoke loader-side type duplicates the
+// fields already in metadata.manifest.
+
+interface extension-loader {
+    use sqlite:extension/metadata@0.1.0.{manifest};
+    use sqlite:extension/policy@0.1.0.{load-options};
+
+    /// Errors the loader may raise (file not found, instantiate
+    /// failure, policy refusal, ...).
+    record loader-error {
+        code: s32,
+        message: string,
+    }
+
+    /// Load a WASM extension component from a host path under the
+    /// supplied policy. Returns the verified manifest on success — the
+    /// same shape produced by metadata.describe().
+    load-extension: func(
+        path: string,
+        options: load-options,
+    ) -> result<manifest, loader-error>;
+
+    /// Unload a previously loaded extension by name.
+    unload-extension: func(name: string) -> result<_, loader-error>;
+
+    /// blake3-hex of the provider bytes for a currently-loaded
+    /// extension. Computed by the host at load time (which has
+    /// the bytes; the cli sandbox may not). Returns the empty
+    /// string for an unknown name. Used by the cli's
+    /// `_capability_grants` table to pin trust to specific bytes
+    /// — `PLAN-grants-db.md` G3.
+    extension-digest: func(name: string) -> string;
+
+    /// Load a WASM extension component from a byte buffer the
+    /// caller supplies in-memory. Same shape as `load-extension`
+    /// but without a filesystem round-trip  used by the cli's
+    /// startup auto-embed path (each `embed-*-component` cargo
+    /// feature stuffs the bytes in via `include_bytes!`).
+    ///
+    /// `name-hint` is the registry key the loader uses when
+    /// the embedded manifest has an empty `name` field; for
+    /// well-formed extensions it's redundant.
+    load-extension-from-bytes: func(
+        name-hint: string,
+        bytes: list<u8>,
+        options: load-options,
+    ) -> result<manifest, loader-error>;
+
+    /// Dispatch a dot command by name. Walks loaded extensions
+    /// for one whose manifest registered `name` as a
+    /// `dot-command-spec`, invokes its `dot-command.invoke`,
+    /// and returns a record carrying:
+    ///   - trailing text the extension wrote to invoke-result.text
+    ///     (in addition to any streamed `cli-stdout` writes,
+    ///     which already landed on the host's stdout)
+    ///   - state-deltas the extension proposed  the cli applies
+    ///     these to its own session state after the call returns
+    ///   - exit-code  process exit code for argv-mode dispatch
+    ///
+    /// `cli-state` is a snapshot the cli builds from its
+    /// SETTINGS thread-local just before this call. The host
+    /// stores it on the dotcmd-aware Store so the extension's
+    /// `cli-state.get-*` reads return the cli's actual current
+    /// values (not the stubs `cli-state` had returned before).
+    /// Each entry is `(key, json-value)` using the same
+    /// slash-namespaced keys as the state-delta schema; an
+    /// extension expecting `display/mode` finds the JSON-string
+    /// it should decode (`"csv"` etc.).
+    ///
+    /// Error variants:
+    ///   - code = 404, message = "no such dot-command"
+    ///     no loaded extension registers that name
+    ///   - code = 500, message = invoke error text
+    ///     the extension itself returned an error
+    dispatch-dot-command: func(
+        name: string,
+        args: string,
+        cli-state: list<tuple<string, string>>,
+    ) -> result<dot-command-result, loader-error>;
+
+    /// State delta the extension proposes  applied by the cli
+    /// after the invoke returns. `value-json` is JSON-encoded so
+    /// the interface doesn't have to track sql-value variants
+    /// across the boundary; the cli decodes by key (and type) in
+    /// the consumer-side state-delta applier.
+    record state-delta {
+        key: string,
+        value-json: string,
+    }
+
+    record dot-command-result {
+        text: string,
+        state-deltas: list<state-delta>,
+        exit-code: s32,
+    }
+
+    /// Phase 4 http-CAS support. The cli's `.sqlink` registry
+    /// stores `sqlink_cas_resolver` rows; on a session-miss for a
+    /// row whose digest isn't in `sqlink_artifact`, the cli walks
+    /// resolvers in priority order. `file` kind is resolved
+    /// cli-side via `std::fs::read`; `http` (and any other
+    /// network-backed kind) routes through here so the host's
+    /// reqwest client + capability gating handles the actual GET.
+    ///
+    /// The host fetches `uri`, blake3-hashes the response body,
+    /// and returns the bytes only if the hash matches
+    /// `expected-digest`. On hash mismatch the error message is
+    /// "digest mismatch: <got> != <expected>"; on network failure
+    /// the underlying error text is passed through.
+    fetch-cas-uri: func(uri: string, expected-digest: string)
+        -> result<list<u8>, loader-error>;
+
+    /// Describe an extension WITHOUT loading it — reads the bytes,
+    /// computes the digest, instantiates briefly to call
+    /// `metadata.describe()`, tears down. Used by the cli to
+    /// resolve the effective grant Policy BEFORE invoking
+    /// `load-extension` (PLAN-grants-db.md pre-load enforcement
+    /// path). The Component cache (C1) means a subsequent real
+    /// `load-extension` of the same path doesn't re-parse the
+    /// bytes — the describe + load pair pays one parse total.
+    /// Returns just the name + digest; the cli uses those for
+    /// grant-table lookup, and the full manifest comes back
+    /// from the subsequent `load-extension` call as normal.
+    describe-extension: func(path: string) -> result<described-result, loader-error>;
+    /// As `describe-extension` but over a URI. v1 supports
+    /// `file:` and `blake3:` schemes only.
+    describe-extension-from-uri: func(uri: string) -> result<described-result, loader-error>;
+
+    record described-result {
+        name: string,
+        digest-hex: string,
+        /// PLAN-latent-cleanup.md L3a: declared capability names
+        /// from the extension's manifest (matches the
+        /// `policy::Capability` enum spelling, e.g.
+        /// "Http", "State", "Cache", "Random"). Populated by the
+        /// pre-load describe path; `--trust=prompt` renders this
+        /// for the user before asking y/N.
+        declared-caps: list<string>,
+    }
+
+    /// PLAN-component-cache.md C3: observability snapshot.
+    /// Returned by `component-cache-stats` and rendered by
+    /// `.cache stats components` in the cli.
+    record component-cache-stats-snapshot {
+        c1-hits:        u64,
+        c2-hits:        u64,
+        cold-parses:    u64,
+        parse-ms:       u64,
+        serialize-ms:   u64,
+        deserialize-ms: u64,
+        /// Times the cache layer was bypassed by
+        /// `SQLITE_WASM_DISABLE_COMPONENT_CACHE` (the
+        /// `--no-component-cache` cli flag's plumbing).
+        bypassed:       u64,
+        /// Current `_component_cache` row count + byte total in
+        /// the user db (E1 LRU eviction observability).
+        row-count:      u64,
+        total-bytes:    u64,
+        max-bytes:      u64,
+    }
+    component-cache-stats: func() -> component-cache-stats-snapshot;
+
+    /// E1: drop every row from `_component_cache`. Returns
+    /// bytes freed. Exposed via `.cache gc components`.
+    component-cache-purge: func() -> u64;
+
+    /// List currently loaded extensions as their manifests.
+    list-extensions: func() -> list<manifest>;
+
+    /// True iff an extension with the given name is currently loaded.
+    is-extension-loaded: func(name: string) -> bool;
+
+    /// Load an extension from a URI (file:/blake3:/https:/oci:/...).
+    /// The host's CAS cache stores resolved bytes by their blake3
+    /// hash; the URI → hash binding lets repeated loads skip the
+    /// resolver. file: and blake3: schemes are handled in-host;
+    /// other schemes route through a registered resolver component.
+    load-extension-from-uri: func(
+        uri: string,
+        options: load-options,
+    ) -> result<manifest, loader-error>;
+
+    /// Register `path` as the resolver for `scheme`. The path
+    /// points at a `resolving`-world component the host loads
+    /// like any other extension (policy applied identically).
+    register-resolver: func(
+        scheme: string,
+        path: string,
+        options: load-options,
+    ) -> result<string, loader-error>;
+
+    /// Drop the resolver registered for `scheme`.
+    unregister-resolver: func(scheme: string) -> result<_, loader-error>;
+
+    /// (scheme, extension-name) pairs for every registered resolver.
+    list-resolvers: func() -> list<tuple<string, string>>;
+
+    /// One row per entry in the CAS cache's uri_index.
+    record uri-cache-entry {
+        uri: string,
+        hash: string,
+        fetched-at: u64,
+    }
+    /// List every URI → hash binding the cache has seen.
+    list-cache-uris: func() -> list<uri-cache-entry>;
+    /// Drop every cached byte + every uri_index entry. Returns the
+    /// number of files removed.
+    purge-cache: func() -> u64;
+
+    /// Aggregate statistics for `.cache stats` / `.cache mode` /
+    /// `.cache config`. `mode` is "external:<path>" or
+    /// "internal"; `max-bytes` is the LRU cap (0 = unbounded).
+    record cache-stats {
+        artifact-count: u64,
+        uri-count: u64,
+        total-bytes: u64,
+        mode: string,
+        max-bytes: u64,
+    }
+    get-cache-stats: func() -> result<cache-stats, loader-error>;
+
+    /// Update the LRU byte cap. 0 disables eviction. Does not
+    /// trigger eviction by itself — call `cache-evict` to apply.
+    cache-set-max-bytes: func(max: u64) -> result<_, loader-error>;
+
+    /// Drop unreferenced artifacts. Returns bytes freed.
+    cache-gc: func() -> result<u64, loader-error>;
+
+    /// Evict in LRU order until total bytes <= target-bytes.
+    /// Returns bytes freed.
+    cache-evict: func(target-bytes: u64) -> result<u64, loader-error>;
+
+    /// Copy the cache contents into a fresh external db at `path`.
+    /// Errors if the target already exists.
+    cache-export: func(path: string) -> result<_, loader-error>;
+
+    /// Merge artifacts + URI bindings from another cache db at
+    /// `path` into this one. INSERT OR IGNORE on artifacts,
+    /// INSERT OR REPLACE on URIs.
+    record cache-merge-stats {
+        artifacts-added: u64,
+        uris-net-change: s64,
+    }
+    do-cache-import: func(path: string) -> result<cache-merge-stats, loader-error>;
+
+    /// Switch the active cache to an external db at `path`. Opens
+    /// (or creates) the file and replaces the current cache
+    /// handle. In-flight CAS reads against the prior handle
+    /// finish on the prior store; the new store handles
+    /// everything after the swap.
+    cache-use-external: func(path: string) -> result<_, loader-error>;
+
+    /// Switch the active cache to internal mode layered on the
+    /// user db at `db-path`. Installs the `__cas_*` tables there
+    /// (idempotent).
+    cache-use-internal: func(db-path: string) -> result<_, loader-error>;
+
+    /// From internal mode: export to a fresh external db at
+    /// `path`, drop the `__cas_*` tables from the current db,
+    /// and switch the active cache to the new external file.
+    /// Returns counts of what was transferred.
+    cache-migrate-to-external: func(path: string) -> result<cache-merge-stats, loader-error>;
+
+    /// From external mode: open internal mode against
+    /// `db-path`, merge the current external db's rows in, and
+    /// switch the active cache to the internal one.
+    cache-migrate-to-internal: func(db-path: string) -> result<cache-merge-stats, loader-error>;
+
+    /// Run a wasm component targeting the `runnable` world: a
+    /// compose-dynlink-shaped wasm component that resolves shared
+    /// providers via the `linker` and exports
+    /// `sqlink:wasm/run.run() -> result<string, string>`. Returns
+    /// the component's output string for the cli to print.
+    /// See PLAN-compose-integration.md.
+    run-wasm: func(
+        path: string,
+        options: load-options,
+    ) -> result<string, loader-error>;
+
+    /// Register a wasm-component provider under `id`. The component
+    /// targets `compose:dynlink/dynlink-provider` (exports
+    /// `endpoint`). Subsequent `linker.resolve-by-id(id)` calls from
+    /// runnable components return an Instance backed by this component.
+    register-wasm-provider: func(
+        id: string,
+        path: string,
+    ) -> result<_, loader-error>;
+
+    /// Register a wasm component as the language runtime for files
+    /// with extension `ext` (no leading dot — e.g. "py", "java",
+    /// "r"). `variant` distinguishes multiple runtimes for the same
+    /// extension — for example "cpython" vs "micropython" for Python.
+    /// Pass an empty string for `variant` to register the DEFAULT
+    /// runtime for `ext`; the cli's `.run foo.<ext>` (no variant)
+    /// uses the default. `.run foo.<ext> variant` picks a specific
+    /// variant. `path` must point to a wasm component targeting the
+    /// `language-runtime` world.
+    register-runtime: func(
+        ext: string,
+        flavor: string,
+        path: string,
+        options: load-options,
+    ) -> result<_, loader-error>;
+
+    /// Drop the runtime registration for `(ext, variant)`. Errors
+    /// if no entry exists for that pair.
+    unregister-runtime: func(
+        ext: string,
+        flavor: string,
+    ) -> result<_, loader-error>;
+
+    /// (extension, variant, path) triples for every registered
+    /// runtime. Default entries have variant = empty string.
+    list-runtimes: func() -> list<tuple<string, string, string>>;
+
+    /// Run a source file through the runtime registered for its
+    /// `(extension, variant)`. The host derives the extension from
+    /// `path`. Pass empty `variant` to use the default variant for
+    /// that extension. The host reads the source contents,
+    /// instantiates the plugin in a fresh Store, calls
+    /// `runtime.execute(file-name, source)`. Returns the plugin's
+    /// output or a loader-error.
+    run-source: func(
+        path: string,
+        flavor: string,
+    ) -> result<string, loader-error>;
+}

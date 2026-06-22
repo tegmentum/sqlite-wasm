@@ -1,0 +1,53 @@
+package sqlink:wasm@0.1.0;
+
+/// Per-extension dispatch slots. Each interface has the same shape as
+/// `sqlite:extension/metadata.describe` + `sqlite:extension/scalar-function.call`
+/// but a distinct identity so `wasm-tools compose -d <name>=...` can
+/// wire each extension into a different import slot in sqlite-cli.
+///
+/// Conceptually the canonical contract is `sqlite:extension/*`; the
+/// slot interfaces here are a per-host adaptation that lives in
+/// `sqlink:wasm` because that's what the composer disambiguates by.
+
+interface fts5-slot {
+    use sqlite:extension/types@0.1.0.{sql-value};
+    use sqlite:extension/metadata@0.1.0.{manifest};
+
+    describe: func() -> manifest;
+    call: func(func-id: u64, args: list<sql-value>) -> result<sql-value, string>;
+}
+
+interface json1-slot {
+    use sqlite:extension/types@0.1.0.{sql-value};
+    use sqlite:extension/metadata@0.1.0.{manifest};
+
+    describe: func() -> manifest;
+    call: func(func-id: u64, args: list<sql-value>) -> result<sql-value, string>;
+}
+
+interface rtree-slot {
+    use sqlite:extension/types@0.1.0.{sql-value};
+    use sqlite:extension/metadata@0.1.0.{manifest};
+
+    describe: func() -> manifest;
+    call: func(func-id: u64, args: list<sql-value>) -> result<sql-value, string>;
+}
+
+interface geopoly-slot {
+    use sqlite:extension/types@0.1.0.{sql-value};
+    use sqlite:extension/metadata@0.1.0.{manifest};
+
+    describe: func() -> manifest;
+    call: func(func-id: u64, args: list<sql-value>) -> result<sql-value, string>;
+}
+
+/// Generic demo slot for end-to-end validation. A composed extension
+/// implementing this slot can declare arbitrary scalar functions that
+/// the host registers and dispatches like any other slot's exports.
+interface demo-slot {
+    use sqlite:extension/types@0.1.0.{sql-value};
+    use sqlite:extension/metadata@0.1.0.{manifest};
+
+    describe: func() -> manifest;
+    call: func(func-id: u64, args: list<sql-value>) -> result<sql-value, string>;
+}

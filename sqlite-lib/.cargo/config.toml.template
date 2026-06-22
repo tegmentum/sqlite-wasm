@@ -1,0 +1,11 @@
+[build]
+target = "wasm32-wasip2"
+
+[target.wasm32-wasip2]
+linker = "rust-lld"
+rustflags = ["-C", "link-arg=--no-entry"]
+
+[env]
+CC_wasm32_wasip2 = "__WASI_SDK_PATH__/bin/clang"
+AR_wasm32_wasip2 = "__WASI_SDK_PATH__/bin/ar"
+CFLAGS_wasm32_wasip2 = "--sysroot=__WASI_SDK_PATH__/share/wasi-sysroot -target wasm32-wasip2"

@@ -1,0 +1,256 @@
+package sqlite:extension@0.1.0;
+
+/// Minimal extension — read-only SQL + scalar functions. Suitable for
+/// stateless pure functions: text transforms, math, hashing.
+world minimal {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+
+    export metadata;
+    export scalar-function;
+}
+
+/// Minimal + outbound HTTP. For extensions whose scalars need
+/// to call out to the network (http_get / jwks_fetch / etc.).
+/// The host gates every request through the manifest's
+/// declared `capability::http` and the load-time http-policy
+/// (allowed-hosts, allowed-methods, max-body-bytes,
+/// timeout-ms).
+world minimal-http {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+    import http;
+
+    export metadata;
+    export scalar-function;
+}
+
+/// Minimal + outbound DNS. For extensions whose scalars need to
+/// resolve hostnames (dns_resolve / dns_lookup_mx / etc.). Same
+/// shape as `minimal-http` but with the `dns` import; gated by
+/// `capability::dns` + load-time `dns-policy.allowed-domains`.
+world minimal-dns {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+    // `http` is imported because `policy.wit` does `use http.{method}`
+    // for its method-allowlist field; bindgen wants the interface
+    // resolvable even when this world doesn't directly use it.
+    import http;
+    import dns;
+
+    export metadata;
+    export scalar-function;
+}
+
+/// Stateful extension — adds aggregate functions, host-managed state,
+/// and an in-memory cache.
+world stateful {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+    import state;
+    import cache;
+
+    export metadata;
+    export scalar-function;
+    export aggregate-function;
+}
+
+/// Extension with full lifecycle awareness. Builds on `stateful` by
+/// adding prepared statements (for setup queries in on-load) and the
+/// lifecycle export.
+world lifecycle-aware {
+    import types;
+    import spi;
+    import session;
+    import prepared;
+    import logging;
+    import config;
+    import state;
+    import cache;
+
+    export metadata;
+    export lifecycle;
+    export scalar-function;
+    export aggregate-function;
+}
+
+/// Extension that resolves URIs to component bytes. Imports `http`
+/// for network-fetching resolvers; the host's capability gate is
+/// what enforces which hosts the resolver can hit (no resolver-
+/// internal policy). scalar-function is exported for the same
+/// metadata-bootstrap reason as `authorizing` / `hooked`.
+world resolving {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+    import http;
+
+    export metadata;
+    export scalar-function;
+    export resolver;
+}
+
+/// Extension that adds a custom collation. Inherits the minimal
+/// import set; adds the collation export. Same shape as `minimal`
+/// plus collation — keeps the import surface small for extensions
+/// that only need to compare strings, without forcing them into
+/// the full world's kitchen sink.
+world collating {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+
+    export metadata;
+    export scalar-function;
+    export collation;
+}
+
+/// Extension that authorizes SQL actions. scalar-function is
+/// exported alongside the authorizer so the host's metadata
+/// bootstrap path (which always instantiates against the minimal
+/// world to read manifest.describe) can resolve the component;
+/// extensions that don't expose SQL functions just return an error
+/// from `call`.
+world authorizing {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+
+    export metadata;
+    export scalar-function;
+    export authorizer;
+}
+
+/// Extension that observes row-level changes and transaction
+/// boundaries. scalar-function exported for the same reason as in
+/// `authorizing` — uniform metadata bootstrap shape.
+world hooked {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+
+    export metadata;
+    export scalar-function;
+    export update-hook;
+    export commit-hook;
+}
+
+/// Extension that exposes one or more virtual-table modules
+/// (read-only). scalar-function is exported alongside vtab for
+/// the same metadata-bootstrap reason as `authorizing`. For vtabs
+/// that mutate (INSERT/UPDATE/DELETE), use `tabular-mutating`.
+world tabular {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+
+    export metadata;
+    export scalar-function;
+    export vtab;
+}
+
+/// Extension that exposes one or more *mutating* virtual-table
+/// modules. Adds the `vtab-update` export on top of `tabular`'s
+/// read surface. The extension declares `vtab-spec.mutable = true`
+/// for each module that participates; vtabs whose spec leaves
+/// `mutable = false` still route through the read-only `vtab`
+/// surface even within this world.
+world tabular-mutating {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+
+    export metadata;
+    export scalar-function;
+    export vtab;
+    export vtab-update;
+}
+
+/// Extension that registers one or more CLI dot commands.
+/// See dotcmd.wit + PLAN-dotcmd-plugins.md.
+///
+/// scalar-function is exported alongside dot-command for the
+/// same metadata-bootstrap reason as `authorizing`, `hooked`,
+/// `tabular`. Extensions that only ship dot commands return an
+/// error from `scalar-function.call`.
+world dotcmd-aware {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+    import cli-stdout;
+    import cli-stderr;
+    import cli-state;
+    /// Phase 5 / follow-up: gives dot-command extensions a tight
+    /// slice of the loader (just enough to register peer
+    /// extensions). Used by `extensions/sqlink-meta-cli` to
+    /// implement `.sqlink install`; ordinary dot-command
+    /// extensions ignore it.
+    import loader-bridge;
+
+    export metadata;
+    export scalar-function;
+    export dot-command;
+}
+
+/// Full-featured extension — every host capability available, every
+/// guest hook offered. Use this when an extension genuinely needs the
+/// kitchen sink; prefer a narrower world otherwise.
+world full {
+    import types;
+    import spi;
+    import session;
+    import prepared;
+    import transaction;
+    import schema;
+    import logging;
+    import config;
+    import state;
+    import cache;
+    import random;
+    import text;
+    import hashing;
+    import encoding;
+    import http;
+    import dns;
+    import cli-stdout;
+    import cli-stderr;
+    import cli-state;
+
+    export metadata;
+    export lifecycle;
+    export scalar-function;
+    export aggregate-function;
+    export collation;
+    export authorizer;
+    export update-hook;
+    export commit-hook;
+    export vtab;
+    export vtab-update;
+    export dot-command;
+}

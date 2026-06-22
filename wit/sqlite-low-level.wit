@@ -1,0 +1,114 @@
+// Low-level C-style SQLite bindings
+// Direct mappings to sqlite3_* functions with opaque handles
+
+interface low-level {
+    // Opaque handles represented as u64
+    type db-handle = u64;
+    type stmt-handle = u64;
+
+    // SQLite result codes
+    enum result-code {
+        ok,
+        error,
+        internal,
+        perm,
+        abort,
+        busy,
+        locked,
+        nomem,
+        readonly,
+        interrupt,
+        ioerr,
+        corrupt,
+        notfound,
+        full,
+        cantopen,
+        protocol,
+        empty,
+        schema,
+        toobig,
+        constraint,
+        mismatch,
+        misuse,
+        nolfs,
+        auth,
+        format,
+        range,
+        notadb,
+        notice,
+        warning,
+        row,
+        done,
+    }
+
+    // SQLite data types
+    enum column-type {
+        integer,
+        float,
+        text,
+        blob,
+        null,
+    }
+
+    // Open flags
+    flags open-flags {
+        readonly,
+        readwrite,
+        create,
+        memory,
+        uri,
+    }
+
+    // Database operations
+    open: func(filename: string, open-flags: open-flags) -> result<db-handle, result-code>;
+    close: func(db: db-handle) -> result-code;
+
+    // SQL execution
+    exec: func(db: db-handle, sql: string) -> result<string, result-code>;
+
+    // Prepared statements
+    prepare: func(db: db-handle, sql: string) -> result<stmt-handle, result-code>;
+    step: func(stmt: stmt-handle) -> result-code;
+    reset: func(stmt: stmt-handle) -> result-code;
+    finalize: func(stmt: stmt-handle) -> result-code;
+
+    // Parameter binding (1-indexed)
+    bind-null: func(stmt: stmt-handle, index: s32) -> result-code;
+    bind-int: func(stmt: stmt-handle, index: s32, value: s32) -> result-code;
+    bind-int64: func(stmt: stmt-handle, index: s32, value: s64) -> result-code;
+    bind-double: func(stmt: stmt-handle, index: s32, value: f64) -> result-code;
+    bind-text: func(stmt: stmt-handle, index: s32, value: string) -> result-code;
+    bind-blob: func(stmt: stmt-handle, index: s32, value: list<u8>) -> result-code;
+    bind-parameter-count: func(stmt: stmt-handle) -> s32;
+    bind-parameter-index: func(stmt: stmt-handle, name: string) -> s32;
+    clear-bindings: func(stmt: stmt-handle) -> result-code;
+
+    // Column retrieval (0-indexed)
+    column-count: func(stmt: stmt-handle) -> s32;
+    column-name: func(stmt: stmt-handle, index: s32) -> string;
+    get-column-type: func(stmt: stmt-handle, index: s32) -> column-type;
+    column-int: func(stmt: stmt-handle, index: s32) -> s32;
+    column-int64: func(stmt: stmt-handle, index: s32) -> s64;
+    column-double: func(stmt: stmt-handle, index: s32) -> f64;
+    column-text: func(stmt: stmt-handle, index: s32) -> string;
+    column-blob: func(stmt: stmt-handle, index: s32) -> list<u8>;
+    column-bytes: func(stmt: stmt-handle, index: s32) -> s32;
+
+    // Error handling
+    errmsg: func(db: db-handle) -> string;
+    errcode: func(db: db-handle) -> result-code;
+    extended-errcode: func(db: db-handle) -> s32;
+
+    // Transaction helpers
+    get-autocommit: func(db: db-handle) -> bool;
+
+    // Database info
+    changes: func(db: db-handle) -> s32;
+    total-changes: func(db: db-handle) -> s32;
+    last-insert-rowid: func(db: db-handle) -> s64;
+
+    // Library info
+    libversion: func() -> string;
+    libversion-number: func() -> s32;
+    sourceid: func() -> string;
+}

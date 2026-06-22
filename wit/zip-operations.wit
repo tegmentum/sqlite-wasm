@@ -1,0 +1,31 @@
+// ZIP operations interface (from tegmentum:compression)
+// Used by .archive command in the CLI
+
+interface zip-operations {
+    /// Create a new ZIP archive from files
+    create-archive: func(path: string) -> result<_, error-code>;
+
+    /// Extract a ZIP archive to destination directory
+    extract-archive: func(path: string, dest: string) -> result<_, error-code>;
+
+    /// List contents of a ZIP archive
+    list-contents: func(path: string) -> result<list<string>, error-code>;
+
+    /// Get archive provider information
+    get-info: func() -> archive-info;
+
+    /// Archive information
+    record archive-info {
+        name: string,
+        version: string,
+        supported-methods: list<string>,
+    }
+
+    /// Error codes
+    enum error-code {
+        io-error,
+        invalid-archive,
+        not-found,
+        permission-denied,
+    }
+}

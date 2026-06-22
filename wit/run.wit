@@ -1,0 +1,54 @@
+package sqlink:wasm@0.1.0;
+
+/// Minimum interface every runnable wasm component exports — a
+/// single `run() -> result<string, string>` entry point the host
+/// calls once per invocation via `.run /path/to/foo.wasm`. The
+/// component body resolves whatever providers it needs via
+/// `compose:dynlink/linker`, does its work, and returns a UTF-8
+/// string for the host to print (or a string error to surface as
+/// such).
+///
+/// Picking this over `wasi:cli/run` because:
+/// 1. wasi:cli/run brings in 30+ WASI imports the component
+///    probably doesn't use, bloating the artifact (~150 KB just
+///    for stdio plumbing).
+/// 2. The return shape we actually want here is `result<string,
+///    string>`, not `result<_, ()>` plus stdio writes.
+/// 3. The host can pipe the output anywhere — SQL row, stdout,
+///    structured response — without parsing stdout.
+interface run {
+    run: func() -> result<string, string>;
+}
+
+/// World every runnable component targets. Adds the dynlink
+/// import so the body can resolve `sqlite-runtime` and other
+/// shared providers.
+world runnable {
+    import compose:dynlink/linker@0.1.0;
+    export run;
+}
+
+/// Plugin interface every language runtime exports. The host
+/// invokes it once per `.run hello.<ext>` call: passes the source
+/// file's name and its UTF-8 contents, gets back whatever the
+/// runtime emits as program output (or a string error).
+///
+/// Where `run.run()` is the one-shot "this component IS the
+/// operation" shape, `runtime.execute(name, source)` is the
+/// "this component is an INTERPRETER for some language" shape.
+/// The runtime body embeds CPython, the JVM, R, COBOL, or
+/// whatever, and runs the source against it.
+interface runtime {
+    execute: func(source-name: string, source: string) -> result<string, string>;
+}
+
+/// World every language-runtime plugin targets. Like `runnable`
+/// but with a parameterized entry point. The plugin embeds an
+/// interpreter and executes whatever source the host passes in.
+/// Registered via `extension-loader.register-runtime`; invoked
+/// by the cli when `.run foo.<ext>` matches the registered
+/// extension.
+world language-runtime {
+    import compose:dynlink/linker@0.1.0;
+    export runtime;
+}

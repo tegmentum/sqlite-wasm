@@ -1,0 +1,165 @@
+package sqlink:wasm@0.1.0;
+
+/// Utilities the `sqlite-library` world exposes alongside the
+/// SPI and high-level surfaces. Captures helpers that don't fit
+/// cleanly into low-level / high-level / spi:
+///
+///   - input parsing for callers implementing their own REPL prompt
+///     (`is-statement-complete`)
+///   - version queries
+///   - programmatic extension loading (mirror of the CLI's `.load`)
+///
+/// The load-extension types here are deliberately structural twins
+/// of `sqlite:extension/policy.load-options` and
+/// `sqlite:extension/metadata.manifest` rather than `use`-imported
+/// from those interfaces. Sharing the canonical types triggered
+/// "interface `sqlink:wasm/library@0.1.0` transitively depends on
+/// an interface in incompatible ways" — wit-bindgen distinguishes
+/// types reachable via imports from types reachable via exports
+/// when the same WIT type sits on both sides of the world boundary.
+/// Local copies trade a one-time conversion in the impl for
+/// consumers that don't have to drag in the full `sqlite:extension`
+/// type graph just to call `load-extension`.
+interface library {
+    /// True iff `buffered` parses as one or more complete SQL
+    /// statements (per `sqlite3_complete`). REPL frontends call this
+    /// after each input line to decide whether to fire the statement
+    /// or show a continuation prompt.
+    is-statement-complete: func(buffered: string) -> bool;
+
+    /// The sqlite-lib crate version (CARGO_PKG_VERSION at build time).
+    library-version: func() -> string;
+
+    /// The bundled SQLite version string (`3.53.1`).
+    sqlite-version: func() -> string;
+
+    /// Errors raised by the load-extension family. Mirrors
+    /// `extension-loader.loader-error`.
+    record loader-error {
+        code: s32,
+        message: string,
+    }
+
+    /// Mirrors `sqlite:extension/policy.capability`. Listed in the
+    /// `load-options.grant` field of `load-extension`.
+    enum capability {
+        spi,
+        prepared,
+        transaction,
+        schema,
+        state,
+        cache,
+        random,
+        text,
+        hashing,
+        encoding,
+        http,
+        dns,
+    }
+
+    /// Mirrors `sqlite:extension/policy.method`.
+    enum http-method {
+        get,
+        head,
+        post,
+        put,
+        %delete,
+        connect,
+        options,
+        trace,
+        patch,
+    }
+
+    /// Mirrors `sqlite:extension/policy.http-policy`.
+    record http-policy {
+        allowed-hosts: list<string>,
+        allowed-methods: option<list<http-method>>,
+        max-body-bytes: option<u64>,
+        timeout-ms: option<u32>,
+    }
+
+    /// Mirrors `sqlite:extension/policy.dns-policy`.
+    record dns-policy {
+        allowed-domains: list<string>,
+        timeout-ms: option<u32>,
+    }
+
+    /// Mirrors `sqlite:extension/policy.fs-policy`.
+    record fs-policy {
+        readable-prefixes: list<string>,
+        writable-prefixes: list<string>,
+        max-write-bytes-per-call: option<u64>,
+    }
+
+    /// Mirrors `sqlite:extension/policy.load-options`. The shape an
+    /// extension is loaded with: capability grants and per-call
+    /// resource caps.
+    record load-options {
+        grant: list<capability>,
+        http-policy: option<http-policy>,
+        dns-policy: option<dns-policy>,
+        fs-policy: option<fs-policy>,
+        fuel-per-call: option<u64>,
+        memory-limit-bytes: option<u64>,
+        epoch-deadline-ms: option<u64>,
+    }
+
+    /// Mirrors `sqlite:extension/types.function-flags`.
+    flags function-flags {
+        deterministic,
+        direct-only,
+        innocuous,
+    }
+
+    /// Mirrors `sqlite:extension/metadata.scalar-function-spec`.
+    record scalar-function-spec {
+        id: u64,
+        name: string,
+        num-args: s32,
+        func-flags: function-flags,
+    }
+
+    /// Mirrors `sqlite:extension/metadata.aggregate-function-spec`.
+    record aggregate-function-spec {
+        id: u64,
+        name: string,
+        num-args: s32,
+        func-flags: function-flags,
+        is-window: bool,
+    }
+
+    /// Mirrors `sqlite:extension/metadata.collation-spec`.
+    record collation-spec {
+        id: u64,
+        name: string,
+    }
+
+    /// Mirrors `sqlite:extension/metadata.manifest`. What the host
+    /// learned from the extension's `describe()` call.
+    record manifest {
+        name: string,
+        version: string,
+        scalar-functions: list<scalar-function-spec>,
+        aggregate-functions: list<aggregate-function-spec>,
+        collations: list<collation-spec>,
+        has-authorizer: bool,
+        has-update-hook: bool,
+        has-commit-hook: bool,
+        declared-capabilities: list<capability>,
+    }
+
+    /// Programmatic `.load`. Forwards to the host's
+    /// `extension-loader.load-extension`.
+    load-extension: func(path: string, opts: load-options) -> result<manifest, loader-error>;
+
+    /// Programmatic `.load <uri>`. Routes through any resolver the
+    /// host has registered for the URI's scheme; `file:` and
+    /// `blake3:` are handled in-host without a resolver.
+    load-extension-from-uri: func(uri: string, opts: load-options) -> result<manifest, loader-error>;
+
+    /// Programmatic `.unload`. Drops the host's registry entry for
+    /// `name`. sqlite3 has no remove-function path in our flag set,
+    /// so functions registered against this component's connection
+    /// stay listed but their dispatch calls fail after unload.
+    unload-extension: func(name: string) -> result<_, loader-error>;
+}

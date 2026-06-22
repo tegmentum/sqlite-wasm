@@ -1,0 +1,28 @@
+package sqlink:wasm@0.1.0;
+
+/// Minimal world used by the wasmtime-side reference host
+/// (sqlink-host crate) for `wasmtime::component::bindgen!`.
+///
+/// Importing just the extension-loader interface gives the host a
+/// tightly scoped binding surface: the bindgen call generates Host
+/// traits for exactly the four loader functions, and
+/// `add_to_linker` registers exactly those four. The other imports
+/// the sqlite-cli-unified world declares (slot interfaces, WASI,
+/// types-only imports from sqlite:extension) are wired separately
+/// by main.rs — slots aren't needed for composed binaries
+/// (sqlite-cli-demo.wasm has them already satisfied), and WASI
+/// comes from `wasmtime_wasi::p2::add_to_linker_sync`.
+world extension-loader-host {
+    import extension-loader;
+    import dispatch;
+    /// PLAN-cli-shared-conn.md Stage 3: the host's bindgen now
+    /// also generates spi + prepared Host traits + add_to_linker
+    /// helpers so the cli component (whose sqlite-cli-command
+    /// world imports the same interfaces) can call them. The
+    /// existing LoadedState impls satisfy the trait for
+    /// extensions; HostWrap satisfies it for the cli.
+    import sqlite:extension/spi@0.1.0;
+    import sqlite:extension/spi-loader@0.1.0;
+    import sqlite:extension/prepared@0.1.0;
+    import sqlite:extension/session@0.1.0;
+}
