@@ -248,6 +248,31 @@ interface commit-hook {
     on-rollback: func();
 }
 
+/// Write-ahead-log hook. Active only if `manifest.has-wal-hook` is
+/// true. SQLite fires this after a WAL commit has appended
+/// `n-frames-in-wal` frames to the WAL for database `db-name`.
+///
+/// Return zero (SQLITE_OK) for normal continuation, or a non-zero
+/// SQLite result code to propagate the error to the calling SQL
+/// statement. Common use cases (the wal-archive extension being
+/// the canonical example) only ever return SQLITE_OK from here;
+/// non-zero codes are reserved for failure paths like
+/// "checkpoint required but couldn't acquire writer lock".
+///
+/// `hook-id` is the manifest-assigned identifier the host uses to
+/// route the call back into the extension. The extension may
+/// declare multiple wal-hook ids in its manifest's
+/// `wal-hooks` list and dispatch in `wal-hook` on the id; the
+/// substrate only ever installs one of them at a time on the
+/// connection (SQLite allows a single wal-hook per connection).
+interface wal-hook {
+    on-wal-hook: func(
+        hook-id: u64,
+        db-name: string,
+        n-frames-in-wal: u32,
+    ) -> s32;
+}
+
 /// Virtual-table dispatch. The host calls every method with the
 /// `vtab-id` declared in the corresponding `vtab-spec` plus a
 /// host-assigned `instance-id` (per `CREATE VIRTUAL TABLE`) and,

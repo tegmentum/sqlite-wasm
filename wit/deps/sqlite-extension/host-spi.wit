@@ -223,6 +223,20 @@ interface spi-loader {
     /// hook pair. Stage 5e.10.
     register-commit-hook: func(ext-name: string) -> result<_, sqlite-error>;
 
+    /// Install the loaded extension's `wal-hook.on-wal-hook` callback
+    /// (selected by `hook-id`) as the active WAL hook on the host's
+    /// shared connection. SQLite fires the wal-hook after each WAL
+    /// commit; the host's trampoline re-enters the extension via the
+    /// imported `dispatch.wal-hook` with the matching `hook-id`.
+    ///
+    /// SQLite allows only one wal-hook per connection; v1 semantics
+    /// are last-write-wins. Cleared by `unregister-extension(ext-name)`.
+    /// Substrate primitive used by the wal-archive extension.
+    register-wal-hook: func(
+        ext-name: string,
+        hook-id: u64,
+    ) -> result<_, sqlite-error>;
+
     /// Register a virtual-table module on the host's shared
     /// connection. The host installs a native sqlite3_module whose
     /// trampolines (xCreate / xConnect / xBestIndex / xFilter /

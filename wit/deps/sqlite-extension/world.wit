@@ -155,6 +155,28 @@ world hooked {
     export commit-hook;
 }
 
+/// Test-bench world that wires every hook surface in one
+/// component: authorizer + update-hook + commit-hook (the latter
+/// also covers rollback per `commit-hook`'s WIT contract) +
+/// wal-hook. Used by extensions like `hookprobe` that exercise
+/// the dispatch-bridge hook trampolines from end-to-end browser
+/// tests. Not intended for production extensions  pick `hooked`
+/// or `authorizing` if you only need one of the three slots.
+world hookprobe {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+
+    export metadata;
+    export scalar-function;
+    export authorizer;
+    export update-hook;
+    export commit-hook;
+    export wal-hook;
+}
+
 /// Extension that exposes one or more virtual-table modules
 /// (read-only). scalar-function is exported alongside vtab for
 /// the same metadata-bootstrap reason as `authorizing`. For vtabs
