@@ -1074,6 +1074,7 @@ mod host_scalars {
     use bindings::sqlite::extension::types::SqlValue as ImpSqlValue;
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// `db::Value`  imported-side `SqlValue` (the type the
     /// `dispatch.scalar-call` import wants). Mirrors the existing
@@ -1100,25 +1101,33 @@ mod host_scalars {
         }
     }
 
-    /// One registered host-resident scalar function. We track
-    /// (name, num_args) so unregister can call back into
-    /// `db::Connection::remove_function` with the correct triple
-    /// SQLite's removal API keys by name + arity.
+    /// Kinds of host-resident registrations a single extension can
+    /// own on sqlite-lib's connection. `unregister-extension` walks
+    /// every entry under the ext-name key and routes to the right
+    /// SQLite removal API (`remove_function` for scalar/aggregate,
+    /// `remove_collation` for collation).
     #[derive(Clone)]
-    struct HostScalar {
-        name: String,
-        num_args: i32,
+    enum HostRegistration {
+        Scalar { name: String, num_args: i32 },
+        Aggregate { name: String, num_args: i32 },
+        Collation { name: String },
     }
 
     thread_local! {
-        /// Per-extension list of (name, num_args) registrations.
-        /// Used by `unregister-extension` to walk + drop everything
-        /// installed under a given ext-name. Indexed by ext_name
-        /// because the JS host's `.unload` flow only carries the
-        /// extension name, not the per-function (name, arity) list
-        /// at unload time.
-        static REGISTRY: RefCell<HashMap<String, Vec<HostScalar>>> =
+        /// Per-extension list of registrations. Used by
+        /// `unregister-extension` to walk + drop everything installed
+        /// under a given ext-name. Indexed by ext_name because the JS
+        /// host's `.unload` flow only carries the extension name, not
+        /// the per-function (name, arity, kind) list at unload time.
+        static REGISTRY: RefCell<HashMap<String, Vec<HostRegistration>>> =
             RefCell::new(HashMap::new());
+
+        /// Monotonic counter handed out as `context-id` by the
+        /// aggregate trampoline's `init()` callback. Each pending
+        /// aggregation gets a fresh id the host uses to key
+        /// per-aggregation state across step / finalize / value /
+        /// inverse calls.
+        static AGG_CTX_COUNTER: AtomicU64 = const { AtomicU64::new(1) };
     }
 
     fn misuse_err(msg: impl Into<String>) -> SpiSqliteError {
@@ -1184,7 +1193,179 @@ mod host_scalars {
             r.borrow_mut()
                 .entry(ext_name)
                 .or_default()
-                .push(HostScalar { name, num_args });
+                .push(HostRegistration::Scalar { name, num_args });
+        });
+        Ok(())
+    }
+
+    /// Trampoline implementation of `db::Aggregate<u64>` that
+    /// forwards every step/finalize call out via the imported
+    /// `dispatch.aggregate-*`. The state type `S = u64` is the
+    /// per-aggregation `context-id` SQLite's
+    /// `sqlite3_aggregate_context` keeps for the lifetime of the
+    /// aggregation; `init()` pulls a fresh id from
+    /// `AGG_CTX_COUNTER` so the JS host can key state by it.
+    struct HostAggregate {
+        ext_name: String,
+        name: String,
+        func_id: u64,
+    }
+
+    fn agg_to_db_err(ext: &str, name: &str, func_id: u64, kind: &str, msg: String) -> db::Error {
+        db::Error {
+            code: libsqlite3_sys::SQLITE_ERROR,
+            extended_code: libsqlite3_sys::SQLITE_ERROR,
+            message: format!(
+                "extension `{}` aggregate `{}` {} (func-id {}): {}",
+                ext, name, kind, func_id, msg
+            ),
+        }
+    }
+
+    impl db::Aggregate<u64> for HostAggregate {
+        fn init(&self) -> u64 {
+            AGG_CTX_COUNTER.with(|c| c.fetch_add(1, Ordering::Relaxed))
+        }
+
+        fn step(&self, ctx: &mut u64, args: &[db::Value]) -> Result<(), db::Error> {
+            let imp_args: Vec<ImpSqlValue> =
+                args.iter().cloned().map(db_to_imp_value).collect();
+            bindings::sqlink::wasm::dispatch::aggregate_step(
+                &self.ext_name,
+                self.func_id,
+                *ctx,
+                &imp_args,
+            )
+            .map_err(|msg| agg_to_db_err(&self.ext_name, &self.name, self.func_id, "step", msg))
+        }
+
+        fn finalize(&self, ctx: Option<u64>) -> Result<db::Value, db::Error> {
+            // If init was never called (no rows in the aggregation),
+            // SQLite still fires xFinal — synthesize a fresh context
+            // so the host's dispatch.aggregate-finalize sees a stable
+            // id even for the empty case. The host's impl is expected
+            // to treat an unknown context-id as "no state, return the
+            // identity value for this aggregate".
+            let ctx_id = ctx.unwrap_or_else(|| {
+                AGG_CTX_COUNTER.with(|c| c.fetch_add(1, Ordering::Relaxed))
+            });
+            bindings::sqlink::wasm::dispatch::aggregate_finalize(
+                &self.ext_name,
+                self.func_id,
+                ctx_id,
+            )
+            .map(imp_value_to_db)
+            .map_err(|msg| {
+                agg_to_db_err(&self.ext_name, &self.name, self.func_id, "finalize", msg)
+            })
+        }
+    }
+
+    impl db::WindowAggregate<u64> for HostAggregate {
+        fn value(&self, ctx: &u64) -> Result<db::Value, db::Error> {
+            bindings::sqlink::wasm::dispatch::aggregate_value(
+                &self.ext_name,
+                self.func_id,
+                *ctx,
+            )
+            .map(imp_value_to_db)
+            .map_err(|msg| agg_to_db_err(&self.ext_name, &self.name, self.func_id, "value", msg))
+        }
+
+        fn inverse(&self, ctx: &mut u64, args: &[db::Value]) -> Result<(), db::Error> {
+            let imp_args: Vec<ImpSqlValue> =
+                args.iter().cloned().map(db_to_imp_value).collect();
+            bindings::sqlink::wasm::dispatch::aggregate_inverse(
+                &self.ext_name,
+                self.func_id,
+                *ctx,
+                &imp_args,
+            )
+            .map_err(|msg| {
+                agg_to_db_err(&self.ext_name, &self.name, self.func_id, "inverse", msg)
+            })
+        }
+    }
+
+    pub(super) fn register_host_aggregate(
+        ext_name: String,
+        name: String,
+        num_args: i32,
+        func_id: u64,
+        is_window: bool,
+    ) -> Result<(), SpiSqliteError> {
+        if name.is_empty() {
+            return Err(misuse_err("register-host-aggregate: empty function name"));
+        }
+        if ext_name.is_empty() {
+            return Err(misuse_err("register-host-aggregate: empty extension name"));
+        }
+
+        let agg = HostAggregate {
+            ext_name: ext_name.clone(),
+            name: name.clone(),
+            func_id,
+        };
+
+        let rc = shared_conn();
+        let conn = rc.borrow();
+        let flags = db::FunctionFlags::UTF8 | db::FunctionFlags::DIRECTONLY;
+        if is_window {
+            conn.create_window_function(&name, num_args, flags, agg)
+                .map_err(spi_db_err)?;
+        } else {
+            conn.create_aggregate_function(&name, num_args, flags, agg)
+                .map_err(spi_db_err)?;
+        }
+        drop(conn);
+
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .entry(ext_name)
+                .or_default()
+                .push(HostRegistration::Aggregate { name, num_args });
+        });
+        Ok(())
+    }
+
+    pub(super) fn register_host_collation(
+        ext_name: String,
+        name: String,
+        collation_id: u64,
+    ) -> Result<(), SpiSqliteError> {
+        if name.is_empty() {
+            return Err(misuse_err("register-host-collation: empty collation name"));
+        }
+        if ext_name.is_empty() {
+            return Err(misuse_err("register-host-collation: empty extension name"));
+        }
+
+        // Trampoline: marshal both strings to the WIT-side strings
+        // and forward to dispatch.collation-compare. Stateless: no
+        // per-comparison context, so we just call.
+        let ext_name_cb = ext_name.clone();
+        let compare = move |a: &str, b: &str| -> std::cmp::Ordering {
+            let rc =
+                bindings::sqlink::wasm::dispatch::collation_compare(&ext_name_cb, collation_id, a, b);
+            if rc < 0 {
+                std::cmp::Ordering::Less
+            } else if rc > 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        };
+
+        let rc = shared_conn();
+        let conn = rc.borrow();
+        conn.create_collation(&name, compare).map_err(spi_db_err)?;
+        drop(conn);
+
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .entry(ext_name)
+                .or_default()
+                .push(HostRegistration::Collation { name });
         });
         Ok(())
     }
@@ -1197,11 +1378,19 @@ mod host_scalars {
         let rc = shared_conn();
         let conn = rc.borrow();
         for entry in entries {
-            // Best-effort removal. SQLITE_ERROR (no such function)
-            // is benign here the connection may have been
-            // reopened via spi.open-db between register and
+            // Best-effort removal. SQLITE_ERROR (no such function /
+            // collation) is benign here the connection may have
+            // been reopened via spi.open-db between register and
             // unregister, in which case there's nothing to remove.
-            let _ = conn.remove_function(&entry.name, entry.num_args);
+            match entry {
+                HostRegistration::Scalar { name, num_args }
+                | HostRegistration::Aggregate { name, num_args } => {
+                    let _ = conn.remove_function(&name, num_args);
+                }
+                HostRegistration::Collation { name } => {
+                    let _ = conn.remove_collation(&name);
+                }
+            }
         }
     }
 
@@ -1213,6 +1402,24 @@ mod host_scalars {
             func_id: u64,
         ) -> Result<(), SpiSqliteError> {
             register_host_scalar(ext_name, name, num_args, func_id)
+        }
+
+        fn register_host_aggregate(
+            ext_name: String,
+            name: String,
+            num_args: i32,
+            func_id: u64,
+            is_window: bool,
+        ) -> Result<(), SpiSqliteError> {
+            register_host_aggregate(ext_name, name, num_args, func_id, is_window)
+        }
+
+        fn register_host_collation(
+            ext_name: String,
+            name: String,
+            collation_id: u64,
+        ) -> Result<(), SpiSqliteError> {
+            register_host_collation(ext_name, name, collation_id)
         }
 
         fn unregister_extension(ext_name: String) {
