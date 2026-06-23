@@ -164,3 +164,68 @@ fn open_in_memory_routes_through_tvm_mem_when_registered() {
         "DELETEONCLOSE should clean up the anonymous in-mem db after the connection drops; before={before} after={after}"
     );
 }
+
+/// Regression for the path-3 trap: SQLite's pager opens, closes,
+/// and `xDelete`s the rollback journal repeatedly while a single
+/// connection drives a workload (one cycle per commit). Before
+/// the multi-memory slice recycling landed, every cycle consumed
+/// a fresh `SLICE_BYTES` window in pool 2, walking the bump
+/// cursor past the pool's `--max-pages` ceiling after just a
+/// couple of commits and trapping the next write OOB.
+///
+/// The in-process `InProcStorage` path doesn't have the pool /
+/// max-pages constraint, so the corresponding wasm32 failure mode
+/// can't surface here. Instead we assert the FILES table
+/// stabilises across many transactions — if the journal entry
+/// were getting recreated each cycle, native `file_count()`
+/// would stay flat (each xDelete removes it from the table)
+/// **but** on wasm32 the slice cursor would walk forward. The
+/// behaviour we want is the same in both: journal lifecycle is
+/// stable across transactions, the FILES table doesn't keep
+/// growing, and reads after many cycles still return the right
+/// rows.
+#[test]
+fn many_transactions_do_not_leak_journal_slices() {
+    let _g = TEST_STATE_MUTEX.lock();
+    install_once();
+
+    let before = sqlite_vfs_tvm::file_count();
+    let c = Connection::open_in_memory().expect("open_in_memory");
+    c.execute_batch("CREATE TABLE t(x INTEGER);").expect("create");
+
+    // Each separate execute_batch + commit cycle through the
+    // pager runs the open/write/close/delete dance on the
+    // journal. Drive enough cycles that a fresh-slice-per-cycle
+    // bug would compound visibly (and would have tripped the
+    // wasm32 pool ceiling several times over).
+    for i in 0..16 {
+        let sql = format!("INSERT INTO t VALUES ({i});");
+        c.execute_batch(&sql).expect("insert in its own txn");
+    }
+
+    let mut s = c.prepare("SELECT count(*), sum(x) FROM t").expect("prepare");
+    match s.step().expect("step") {
+        StepResult::Row => {
+            let count = match s.column_value(0) {
+                Value::Integer(n) => n,
+                other => panic!("count not integer: {other:?}"),
+            };
+            let sum = match s.column_value(1) {
+                Value::Integer(n) => n,
+                other => panic!("sum not integer: {other:?}"),
+            };
+            assert_eq!(count, 16, "all 16 inserts should be visible");
+            assert_eq!(sum, (0..16).sum::<i64>());
+        }
+        StepResult::Done => panic!("no row from count query"),
+    }
+
+    drop(s);
+    drop(c);
+
+    // After the connection drops, DELETEONCLOSE on the anon main
+    // db should sweep its journal too, leaving the FILES table
+    // back where it started.
+    let after = sqlite_vfs_tvm::file_count();
+    assert_eq!(after, before, "main db close should sweep auxiliaries; before={before} after={after}");
+}

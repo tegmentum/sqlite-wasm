@@ -32,6 +32,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 
 use tvm_guest_mm_rt::{read_bytes, write_bytes, Pool};
 
@@ -58,13 +59,27 @@ const CHUNK_SIZE: u32 = 4096;
 /// link time.
 pub const SLICE_BYTES: u32 = 256 * 1024 * 1024;
 
-/// Global bump cursor over pool 2. Each `MultiMemoryStorage::new`
-/// reserves `SLICE_BYTES` starting at the current cursor; the
-/// cursor advances atomically and is never reclaimed. xClose
-/// drops the per-file metadata but leaves the slice unused —
-/// fine for a wasm process whose VFS lifetime matches the
-/// process lifetime.
+/// Global bump cursor over pool 2. `MultiMemoryStorage::new`
+/// reserves `SLICE_BYTES` starting at the current cursor when
+/// the free list is empty; otherwise it pops a recycled base
+/// from the free list (see `FREE_SLICES`).
 static NEXT_SLICE_OFFSET: AtomicU32 = AtomicU32::new(0);
+
+/// Free list of slice bases released by `MultiMemoryStorage::release`
+/// (called from the VFS layer when SQLite deletes a file via
+/// `xDelete` or when an auxiliary file's owner closes). Reusing
+/// slices is load-bearing: SQLite opens/closes/deletes its rollback
+/// journal many times during normal pager activity, and without
+/// reuse the bump cursor walks past the pool's `--max-pages`
+/// ceiling after only a couple of journal cycles — every subsequent
+/// write to the journal traps OOB because the slice base lives in
+/// a memory range the shell hasn't grown into.
+///
+/// The list uses a plain `Mutex<Vec<u32>>` rather than a lock-free
+/// stack: SQLite's threading mode for the in-memory file path is
+/// effectively single-threaded inside the wasm guest, contention is
+/// nil, and the simpler shape keeps the implementation auditable.
+static FREE_SLICES: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 /// File-storage backed by a slice of pool 2.
 pub struct MultiMemoryStorage {
@@ -88,20 +103,45 @@ pub struct MultiMemoryStorage {
 pub struct PoolFull;
 
 impl MultiMemoryStorage {
-    /// Reserve a fresh slice of pool 2 and return a storage that
-    /// addresses within it. Returns `Err(PoolFull)` if pool 2 is
-    /// exhausted (cursor overflowed u32).
+    /// Reserve a slice of pool 2 and return a storage that addresses
+    /// within it. Prefers a slice from the free list (released by an
+    /// earlier `release` call) before bumping the cursor. Returns
+    /// `Err(PoolFull)` if the bump cursor overflows u32 with the
+    /// free list empty.
     pub fn new() -> Result<Self, PoolFull> {
-        let base = NEXT_SLICE_OFFSET.fetch_add(SLICE_BYTES, Ordering::Relaxed);
-        if base.checked_add(SLICE_BYTES).is_none() {
-            return Err(PoolFull);
-        }
+        let base = if let Some(recycled) = FREE_SLICES.lock().ok().and_then(|mut v| v.pop()) {
+            recycled
+        } else {
+            let b = NEXT_SLICE_OFFSET.fetch_add(SLICE_BYTES, Ordering::Relaxed);
+            if b.checked_add(SLICE_BYTES).is_none() {
+                return Err(PoolFull);
+            }
+            b
+        };
         Ok(Self {
             base,
             capacity: SLICE_BYTES,
             written_chunks: HashSet::new(),
             size: 0,
         })
+    }
+
+}
+
+/// On drop, return the slice's base to the free list so future
+/// opens can recycle it. The VFS layer maintains `FILES` as
+/// `Arc<Mutex<Box<dyn FileStorage>>>`; once `xDelete` or the
+/// owning main-db's `io_close` removes the entry and the last
+/// reference drops, this fires automatically.
+///
+/// Test note: native builds use `InProcStorage` and never reach
+/// this `Drop`, so the free list never sees a stale base from
+/// outside wasm.
+impl Drop for MultiMemoryStorage {
+    fn drop(&mut self) {
+        if let Ok(mut v) = FREE_SLICES.lock() {
+            v.push(self.base);
+        }
     }
 }
 

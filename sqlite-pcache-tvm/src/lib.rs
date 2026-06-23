@@ -58,19 +58,21 @@ pub fn cache_diagnostics() -> (u32, u32, u32, u32) {
 pub mod cache;
 pub mod region;
 
-// On wasm32 the cold tier is the multi-memory pool-backed
+// On wasm32 the cold tier is normally the multi-memory pool-backed
 // region — page bytes live in pool 1 of the tvm-guest-mm shell,
 // addressed through the `tvm-guest-mm-rt` dispatch helpers. The
 // in-proc HashMap backend stays the default on native (where the
 // pool helpers don't exist and would be no-ops anyway), giving
 // `cargo test` a backend that works without the multi-memory
-// substrate.
-#[cfg(target_arch = "wasm32")]
+// substrate. The `single-memory` feature forces the in-proc backend
+// even on wasm32; this is the browser flavor where jco can't yet
+// transpile multi-memory inner modules.
+#[cfg(all(target_arch = "wasm32", not(feature = "single-memory")))]
 pub mod multi_memory_region;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "single-memory")))]
 type ActiveRegion = multi_memory_region::MultiMemoryRegion;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "single-memory"))]
 type ActiveRegion = region::InProcRegion;
 
 type ActiveCache = cache::ShadowCache<ActiveRegion>;

@@ -56,13 +56,15 @@ use parking_lot::Mutex;
 
 pub mod storage;
 
-// On wasm32 the file storage is a multi-memory pool-backed
+// On wasm32 the file storage is normally a multi-memory pool-backed
 // storage: file bytes live in pool 2 of the `tvm-guest-mm`
 // shell, accessed through the `tvm-guest-mm-rt` dispatch
 // helpers. The in-proc Vec<u8> backend stays the default on
 // native (where the pool helpers don't exist) for the
-// unit-test path.
-#[cfg(target_arch = "wasm32")]
+// unit-test path. The `single-memory` feature forces the in-proc
+// backend even on wasm32; this is the browser flavor where jco
+// can't yet transpile multi-memory inner modules.
+#[cfg(all(target_arch = "wasm32", not(feature = "single-memory")))]
 pub mod multi_memory_storage;
 
 use storage::FileStorage;
@@ -71,12 +73,12 @@ use storage::FileStorage;
 /// TVM-backed variant fails to create its region; the InProc
 /// variant is infallible. Trampoline maps the error to
 /// SQLITE_IOERR.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "single-memory"))]
 fn make_storage() -> Result<Box<dyn FileStorage>, c_int> {
     Ok(Box::new(storage::InProcStorage::new()))
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "single-memory")))]
 fn make_storage() -> Result<Box<dyn FileStorage>, c_int> {
     match multi_memory_storage::MultiMemoryStorage::new() {
         Ok(s) => Ok(Box::new(s)),
@@ -109,12 +111,31 @@ static FILES: Lazy<Mutex<FileTable>> = Lazy::new(|| Mutex::new(HashMap::new()));
 /// SQLite calls xOpen with a NULL filename.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Reserved name prefix for ephemeral in-memory databases
+/// synthesized by `core::db::open_in_memory` when routing through
+/// `tvm-mem`. Used by `xOpen` to recognise main-db opens that
+/// own auxiliary files (`-journal` / `-wal` / `-shm`) and by
+/// `io_close` to sweep those auxiliaries when the owner closes.
+const TVM_ANON_PREFIX: &str = "/__tvm_mem_anon_";
+
+/// Suffixes SQLite appends to a main db's filename to derive the
+/// auxiliary file names (rollback journal, WAL, shared-memory).
+/// We never carry delete-on-close for these — auxiliaries follow
+/// the main db's lifecycle, which is enforced by the prefix
+/// sweep in `io_close`.
+const AUX_SUFFIXES: &[&str] = &["-journal", "-wal", "-shm"];
+
 /// Per-file state we own. The outer `sqlite3_file` SQLite
 /// allocates is just the `pMethods` pointer + our inner ptr.
 struct TvmFileInner {
     storage: Arc<Mutex<Box<dyn FileStorage>>>,
     name: String,
     delete_on_close: bool,
+    /// True for `-journal` / `-wal` / `-shm` files attached to
+    /// an owning main db. Used to suppress the prefix-sweep in
+    /// `io_close` so the auxiliary's close doesn't try to walk
+    /// the FILES table looking for further children.
+    is_auxiliary: bool,
 }
 
 /// `#[repr(C)]` so the `base` field is at offset 0 — SQLite
@@ -138,7 +159,21 @@ unsafe extern "C" fn io_close(file: *mut sqlite3_file) -> c_int {
         // SAFETY: inner_ptr came from `Box::into_raw` in io_open.
         let inner = Box::from_raw(inner_ptr);
         if inner.delete_on_close {
-            FILES.lock().remove(&inner.name);
+            let mut files = FILES.lock();
+            files.remove(&inner.name);
+            // If this was a main db file with the anon prefix, sweep
+            // any auxiliary files (journal/wal/shm) that share the
+            // base name. SQLite opens/closes auxiliaries multiple
+            // times across the main db's lifetime, so we keep them
+            // around until the owner closes; doing the sweep here
+            // matches the comment in `vfs_open` ("aux files should
+            // share the main db's lifecycle") without the bug of
+            // freeing them on every cycle (which leaked one slice of
+            // pool 2 per close/reopen).
+            if inner.name.starts_with(TVM_ANON_PREFIX) && !inner.is_auxiliary {
+                let prefix = format!("{}-", inner.name);
+                files.retain(|k, _| !k.starts_with(&prefix));
+            }
         }
         // dropped here
         (*tf).inner = ptr::null_mut();
@@ -308,30 +343,44 @@ unsafe extern "C" fn vfs_open(
     // NULL filename = SQLite wants a temp file. Synthesize a
     // unique name + flag for delete-on-close so we don't
     // accumulate temps. Named opens also get delete-on-close
-    // when the caller passes SQLITE_OPEN_DELETEONCLOSE  used
+    // when the caller passes SQLITE_OPEN_DELETEONCLOSE — used
     // by core::db::open_in_memory to get an ephemeral tvm-mem
     // db that cleans itself up when the connection drops.
     //
-    // Files under the path prefix `/__tvm_mem_anon_` are also
-    // auto-delete  the prefix is reserved for
-    // `core::db::open_in_memory`'s synthetic names, and SQLite's
-    // rollback journal / WAL files attached to such a db end up
-    // at `/__tvm_mem_anon_N-journal` (or `-wal`, `-shm`) which
-    // don't carry SQLITE_OPEN_DELETEONCLOSE on their opens but
-    // should share the main db's lifecycle. Without this, the
-    // auxiliary files leak in FILES across in-mem db opens.
+    // Files under the path prefix `/__tvm_mem_anon_` that do
+    // NOT end in `-journal` / `-wal` / `-shm` are main-db opens
+    // for `core::db::open_in_memory`'s synthetic names; we
+    // force delete-on-close so the slice gets dropped when the
+    // db connection closes. The auxiliary files for such a db
+    // (`/__tvm_mem_anon_N-journal` etc.) share the main db's
+    // lifecycle, but SQLite opens/closes them many times during
+    // normal pager activity — so we mark them `is_auxiliary`
+    // (not delete-on-close) and let the main db's `io_close`
+    // sweep them via the prefix walk in FILES.
     let explicit_delete = (flags & ffi::SQLITE_OPEN_DELETEONCLOSE) != 0;
-    const TVM_ANON_PREFIX: &str = "/__tvm_mem_anon_";
-    let (name, delete_on_close) = if z_name.is_null() {
+    let (name, delete_on_close, is_auxiliary) = if z_name.is_null() {
         let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        (format!("__tvm_tmp_{n}"), true)
+        (format!("__tvm_tmp_{n}"), true, false)
     } else {
         let s = match CStr::from_ptr(z_name as *const c_char).to_str() {
             Ok(s) => s.to_string(),
             Err(_) => return ffi::SQLITE_IOERR,
         };
-        let anon = s.starts_with(TVM_ANON_PREFIX);
-        (s, explicit_delete || anon)
+        let anon_main = s.starts_with(TVM_ANON_PREFIX)
+            && !AUX_SUFFIXES.iter().any(|suf| s.ends_with(suf));
+        let aux = s.starts_with(TVM_ANON_PREFIX)
+            && AUX_SUFFIXES.iter().any(|suf| s.ends_with(suf));
+        // Main-db opens with the anon prefix get delete-on-close so
+        // a dropped in-memory db cleans up its slice + its
+        // auxiliaries (handled by the prefix sweep in `io_close`).
+        // Auxiliary files (`-journal` / `-wal` / `-shm`) do NOT
+        // carry delete-on-close from the prefix alone — SQLite
+        // opens/closes auxiliaries multiple times during normal
+        // operation, and each "close" used to free the FILES entry,
+        // forcing the next open to allocate a fresh pool-2 slice
+        // (leaking 256 MiB per cycle until the pool's max_pages
+        // ceiling traps the third write).
+        (s, explicit_delete || anon_main, aux)
     };
 
     let storage = {
@@ -358,6 +407,7 @@ unsafe extern "C" fn vfs_open(
         storage,
         name,
         delete_on_close,
+        is_auxiliary,
     }));
 
     // Initialize the sqlite3_file slab. SAFETY: SQLite passes us
