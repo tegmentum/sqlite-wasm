@@ -16,6 +16,15 @@ already correct from this commit, so backend swap is contained.
 """
 license = "MIT"
 
+[features]
+# Force the in-process (HashMap-backed) region on wasm32 as well as
+# native. Used by the browser flavor of sqlite-lib so the resulting
+# cdylib has exactly one linear memory and can be transpiled by jco
+# (which doesn't yet support multi-memory inner core modules).
+# Default off  multi-memory is still the preferred wasm32 build for
+# the native wasmtime runtime where pool capacity matters.
+single-memory = []
+
 [dependencies]
 # Same libsqlite3-sys version core/cli use. NOT bundled  the
 # bundled compile lives in core, and cargo's `links =`
