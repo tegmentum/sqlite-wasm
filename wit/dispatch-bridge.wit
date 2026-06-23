@@ -151,6 +151,25 @@ interface dispatch-bridge {
         ext-name: string,
     ) -> result<_, sqlite-error>;
 
+    /// Install a wal-hook trampoline on sqlite-lib's internal
+    /// connection routed to `ext-name` + `hook-id`. SQLite fires the
+    /// wal-hook AFTER a WAL commit has appended `n-frames-in-wal`
+    /// frames to the WAL for database `db-name`; the trampoline
+    /// re-enters the host via the imported `dispatch.wal-hook` with
+    /// the same `(ext-name, hook-id, db-name, n-frames-in-wal)`.
+    /// Return value: SQLITE_OK (0) for normal continuation, any
+    /// other code propagates as an error to the calling SQL
+    /// statement.
+    ///
+    /// SQLite allows only one wal-hook per connection; v1 semantics
+    /// are last-write-wins. Cleared by
+    /// `unregister-extension(ext-name)`. Substrate primitive used by
+    /// the wal-archive extension.
+    register-host-wal-hook: func(
+        ext-name: string,
+        hook-id: u64,
+    ) -> result<_, sqlite-error>;
+
     /// Drop every host registration (scalar, aggregate, collation,
     /// authorizer, update/commit/rollback hook) belonging to
     /// `ext-name`. Mirrors `spi-loader.unregister-extension` on

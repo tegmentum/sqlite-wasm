@@ -123,6 +123,25 @@ interface dispatch {
     /// Route a post-rollback notification.
     on-rollback: func(ext-name: string);
 
+    /// Route a WAL-commit notification. Fires AFTER a WAL commit has
+    /// just appended `n-frames-in-wal` frames to the WAL for the
+    /// database attached as `db-name`. The host's wal-hook trampoline
+    /// re-enters the loaded extension's `wal-hook.on-wal-hook` callback
+    /// keyed by `hook-id`; the returned i32 is the SQLite result code
+    /// to propagate (SQLITE_OK = 0 for normal continuation, non-zero
+    /// to propagate an error to the calling SQL statement).
+    ///
+    /// Substrate primitive used by the wal-archive extension. SQLite
+    /// allows only one wal-hook per connection; the loaded extension's
+    /// `wal-hook` interface is the one currently installed via
+    /// `dispatch-bridge.register-host-wal-hook`.
+    wal-hook: func(
+        ext-name: string,
+        hook-id: u64,
+        db-name: string,
+        n-frames-in-wal: u32,
+    ) -> s32;
+
     /// Vtab dispatches. The in-WASM cli registers an
     /// `sqlite3_module` whose xCreate/xConnect/xBestIndex/etc
     /// callbacks marshal here. `vtab-id` from the manifest +
