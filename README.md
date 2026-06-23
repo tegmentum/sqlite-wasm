@@ -16,7 +16,7 @@ submodule.
 | `core` (`sqlite-component-core`) | Rust wrapper around libsqlite3-sys: `Connection`, `Statement`, `Value`, prepared-stmt API. |
 | `sqlite-lib` | wasm component that exports `sqlite:extension/spi` and friends — drop into any wasm host that wants SQL via composition. |
 | `sqlite-embed` | Static-embed helpers for native Rust extensions (the C-side `sqlite3_create_function_v2` glue). |
-| `sqlite-pcache-tvm` / `sqlite-mem-tvm` / `sqlite-vfs-tvm` / `sqlite-tvm-bindings` | Trusted-VM modules: SQLite's pcache / page cache / VFS surfaces exposed as wasm-side providers via `compose:dynlink`. |
+| `sqlite-pcache-tvm` / `sqlite-mem-tvm` / `sqlite-vfs-tvm` | Multi-memory cold-tier providers: SQLite's pcache + VFS bytes routed through pool 1 / pool 2 of the `tvm-guest-mm` shell (see [tvm-wasm](https://github.com/tegmentum/tvm-wasm)). |
 
 ## Submodule
 
