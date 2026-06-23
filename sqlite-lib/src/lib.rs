@@ -1036,4 +1036,189 @@ impl LibraryGuest for SqliteLib {
     }
 }
 
+// =========================================================================
+// sqlink:wasm/dispatch-bridge
+//
+// Lets the host install a sqlite3 scalar-function trampoline on
+// sqlite-lib's internal default connection. The trampoline's body
+// calls back out via the imported `dispatch.scalar-call`.
+//
+// Why this exists: in the native scenario the host owns the
+// sqlite3* connection that serves BOTH spi.execute and
+// spi-loader.register-scalar, so `sqlite3_create_function_v2` from
+// register-scalar is immediately visible to the SQL the cli runs
+// next. In the composed `cli + sqlite-lib` browser scenario the
+// cli's spi.execute is served by sqlite-lib's in-WASM connection
+// but spi-loader.register-scalar is served by the JS host the JS
+// host needs a path to inject a function into sqlite-lib's
+// connection. This export is that path.
+//
+// Note on re-entry: the trampoline runs inside sqlite3_step under
+// a `RefCell::borrow` on shared_conn (held by `spi_with`). If the
+// imported `dispatch.scalar-call` re-enters this component via
+// spi.execute (e.g. a host-implemented scalar runs `SELECT ...`
+// internally) the second borrow_mut will panic. Today none of the
+// smoke matrix's scalars do SPI re-entry; uuid(), regexp_match(),
+// etc are pure functions. Aggregates / vtabs that do recursive SPI
+// will need a `try_borrow` fallback or a re-entrant SPI shape; out
+// of scope for v1.
+// =========================================================================
+
+mod host_scalars {
+    use super::bindings;
+    use super::shared_conn;
+    use super::spi_db_err;
+    use crate::db;
+    use bindings::exports::sqlink::wasm::dispatch_bridge::Guest as DispatchBridgeGuest;
+    use bindings::exports::sqlite::extension::spi::SqliteError as SpiSqliteError;
+    use bindings::sqlite::extension::types::SqlValue as ImpSqlValue;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    /// `db::Value`  imported-side `SqlValue` (the type the
+    /// `dispatch.scalar-call` import wants). Mirrors the existing
+    /// `db_to_spi_value` but targets the import-side variant,
+    /// which wit-bindgen treats as a distinct type from the
+    /// export-side one even though the WIT shape is the same.
+    fn db_to_imp_value(v: db::Value) -> ImpSqlValue {
+        match v {
+            db::Value::Null => ImpSqlValue::Null,
+            db::Value::Integer(i) => ImpSqlValue::Integer(i),
+            db::Value::Real(r) => ImpSqlValue::Real(r),
+            db::Value::Text(s) => ImpSqlValue::Text(s),
+            db::Value::Blob(b) => ImpSqlValue::Blob(b),
+        }
+    }
+
+    fn imp_value_to_db(v: ImpSqlValue) -> db::Value {
+        match v {
+            ImpSqlValue::Null => db::Value::Null,
+            ImpSqlValue::Integer(i) => db::Value::Integer(i),
+            ImpSqlValue::Real(r) => db::Value::Real(r),
+            ImpSqlValue::Text(s) => db::Value::Text(s),
+            ImpSqlValue::Blob(b) => db::Value::Blob(b),
+        }
+    }
+
+    /// One registered host-resident scalar function. We track
+    /// (name, num_args) so unregister can call back into
+    /// `db::Connection::remove_function` with the correct triple
+    /// SQLite's removal API keys by name + arity.
+    #[derive(Clone)]
+    struct HostScalar {
+        name: String,
+        num_args: i32,
+    }
+
+    thread_local! {
+        /// Per-extension list of (name, num_args) registrations.
+        /// Used by `unregister-extension` to walk + drop everything
+        /// installed under a given ext-name. Indexed by ext_name
+        /// because the JS host's `.unload` flow only carries the
+        /// extension name, not the per-function (name, arity) list
+        /// at unload time.
+        static REGISTRY: RefCell<HashMap<String, Vec<HostScalar>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    fn misuse_err(msg: impl Into<String>) -> SpiSqliteError {
+        SpiSqliteError {
+            code: libsqlite3_sys::SQLITE_MISUSE,
+            extended_code: libsqlite3_sys::SQLITE_MISUSE,
+            message: msg.into(),
+        }
+    }
+
+    pub(super) fn register_host_scalar(
+        ext_name: String,
+        name: String,
+        num_args: i32,
+        func_id: u64,
+    ) -> Result<(), SpiSqliteError> {
+        if name.is_empty() {
+            return Err(misuse_err("register-host-scalar: empty function name"));
+        }
+        if ext_name.is_empty() {
+            return Err(misuse_err("register-host-scalar: empty extension name"));
+        }
+
+        // Build the trampoline. Captures ext_name + func_id; on
+        // call, marshals SqlValue args, invokes the imported
+        // `dispatch.scalar-call`, and threads the result back.
+        // Cloned because `db::Connection::create_scalar_function`
+        // wants a 'static closure.
+        let ext_name_cb = ext_name.clone();
+        let name_cb = name.clone();
+        let callback = move |args: &[db::Value]| -> Result<db::Value, db::Error> {
+            let imp_args: Vec<ImpSqlValue> =
+                args.iter().cloned().map(db_to_imp_value).collect();
+            match bindings::sqlink::wasm::dispatch::scalar_call(
+                &ext_name_cb,
+                func_id,
+                &imp_args,
+            ) {
+                Ok(v) => Ok(imp_value_to_db(v)),
+                Err(msg) => Err(db::Error {
+                    code: libsqlite3_sys::SQLITE_ERROR,
+                    extended_code: libsqlite3_sys::SQLITE_ERROR,
+                    message: format!(
+                        "extension `{}` scalar `{}` (func-id {}): {}",
+                        ext_name_cb, name_cb, func_id, msg
+                    ),
+                }),
+            }
+        };
+
+        let rc = shared_conn();
+        let conn = rc.borrow();
+        conn.create_scalar_function(
+            &name,
+            num_args,
+            db::FunctionFlags::UTF8 | db::FunctionFlags::DETERMINISTIC,
+            callback,
+        )
+        .map_err(spi_db_err)?;
+        drop(conn);
+
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .entry(ext_name)
+                .or_default()
+                .push(HostScalar { name, num_args });
+        });
+        Ok(())
+    }
+
+    pub(super) fn unregister_extension(ext_name: String) {
+        let entries = REGISTRY.with(|r| r.borrow_mut().remove(&ext_name));
+        let Some(entries) = entries else {
+            return;
+        };
+        let rc = shared_conn();
+        let conn = rc.borrow();
+        for entry in entries {
+            // Best-effort removal. SQLITE_ERROR (no such function)
+            // is benign here the connection may have been
+            // reopened via spi.open-db between register and
+            // unregister, in which case there's nothing to remove.
+            let _ = conn.remove_function(&entry.name, entry.num_args);
+        }
+    }
+
+    impl DispatchBridgeGuest for super::SqliteLib {
+        fn register_host_scalar(
+            ext_name: String,
+            name: String,
+            num_args: i32,
+            func_id: u64,
+        ) -> Result<(), SpiSqliteError> {
+            register_host_scalar(ext_name, name, num_args, func_id)
+        }
+
+        fn unregister_extension(ext_name: String) {
+            unregister_extension(ext_name)
+        }
+    }
+}
+
 bindings::export!(SqliteLib with_types_in bindings);
