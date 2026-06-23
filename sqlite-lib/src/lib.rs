@@ -1105,12 +1105,31 @@ mod host_scalars {
     /// own on sqlite-lib's connection. `unregister-extension` walks
     /// every entry under the ext-name key and routes to the right
     /// SQLite removal API (`remove_function` for scalar/aggregate,
-    /// `remove_collation` for collation).
+    /// `remove_collation` for collation, the appropriate
+    /// `*_hook(None)` / `set_authorizer(None)` call for the hook
+    /// variants, but only if THIS ext-name is the one currently
+    /// owning the slot — see `HOOK_OWNERS`).
     #[derive(Clone)]
     enum HostRegistration {
         Scalar { name: String, num_args: i32 },
         Aggregate { name: String, num_args: i32 },
         Collation { name: String },
+        /// One of the four singleton-per-connection slots
+        /// (authorizer, update-hook, commit-hook, rollback-hook).
+        /// `unregister-extension` only clears the slot if the
+        /// currently-owning ext-name (`HOOK_OWNERS`) matches.
+        Hook { kind: HookKind },
+    }
+
+    /// The four singleton-per-connection hook slots. SQLite allows
+    /// only one of each per connection; v1 dispatch-bridge semantics
+    /// are last-write-wins.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub(super) enum HookKind {
+        Authorizer,
+        UpdateHook,
+        CommitHook,
+        RollbackHook,
     }
 
     thread_local! {
@@ -1128,6 +1147,17 @@ mod host_scalars {
         /// per-aggregation state across step / finalize / value /
         /// inverse calls.
         static AGG_CTX_COUNTER: AtomicU64 = const { AtomicU64::new(1) };
+
+        /// Which ext-name currently owns each singleton hook slot
+        /// (authorizer, update-hook, commit-hook, rollback-hook).
+        /// `None` = slot empty. v1 last-write-wins: re-registering
+        /// the same kind from a different ext-name overwrites the
+        /// previous owner; the previous owner's REGISTRY entry is
+        /// stale but harmless (unregister-extension on the previous
+        /// owner finds nothing to clear because HOOK_OWNERS no
+        /// longer points to it).
+        static HOOK_OWNERS: RefCell<HashMap<HookKind, String>> =
+            RefCell::new(HashMap::new());
     }
 
     fn misuse_err(msg: impl Into<String>) -> SpiSqliteError {
@@ -1370,6 +1400,276 @@ mod host_scalars {
         Ok(())
     }
 
+    /// Map a SQLite auth-action code (libsqlite3_sys::SQLITE_*) to
+    /// the WIT-side `AuthAction` enum the dispatch interface uses.
+    /// Unrecognized codes fall back to `Function` — the safest
+    /// "permit unless deny" bucket, since the host's authorizer
+    /// will see them as `function` and decide based on its own
+    /// policy. The cli's stderr-logging authorizer cares about the
+    /// raw action code (passed elsewhere); the WIT-side enum is
+    /// the contract for dynamically-loaded extensions.
+    fn imp_auth_action(code: i32) -> bindings::sqlite::extension::types::AuthAction {
+        use bindings::sqlite::extension::types::AuthAction as A;
+        use libsqlite3_sys::*;
+        match code {
+            SQLITE_CREATE_INDEX => A::CreateIndex,
+            SQLITE_CREATE_TABLE => A::CreateTable,
+            SQLITE_CREATE_TEMP_INDEX => A::CreateTempIndex,
+            SQLITE_CREATE_TEMP_TABLE => A::CreateTempTable,
+            SQLITE_CREATE_TEMP_TRIGGER => A::CreateTempTrigger,
+            SQLITE_CREATE_TEMP_VIEW => A::CreateTempView,
+            SQLITE_CREATE_TRIGGER => A::CreateTrigger,
+            SQLITE_CREATE_VIEW => A::CreateView,
+            SQLITE_DELETE => A::Delete,
+            SQLITE_DROP_INDEX => A::DropIndex,
+            SQLITE_DROP_TABLE => A::DropTable,
+            SQLITE_DROP_TEMP_INDEX => A::DropTempIndex,
+            SQLITE_DROP_TEMP_TABLE => A::DropTempTable,
+            SQLITE_DROP_TEMP_TRIGGER => A::DropTempTrigger,
+            SQLITE_DROP_TEMP_VIEW => A::DropTempView,
+            SQLITE_DROP_TRIGGER => A::DropTrigger,
+            SQLITE_DROP_VIEW => A::DropView,
+            SQLITE_INSERT => A::Insert,
+            SQLITE_PRAGMA => A::Pragma,
+            SQLITE_READ => A::Read,
+            SQLITE_SELECT => A::Select,
+            SQLITE_TRANSACTION => A::Transaction,
+            SQLITE_UPDATE => A::Update,
+            SQLITE_ATTACH => A::Attach,
+            SQLITE_DETACH => A::Detach,
+            SQLITE_ALTER_TABLE => A::AlterTable,
+            SQLITE_REINDEX => A::Reindex,
+            SQLITE_ANALYZE => A::Analyze,
+            SQLITE_CREATE_VTABLE => A::CreateVtable,
+            SQLITE_DROP_VTABLE => A::DropVtable,
+            SQLITE_FUNCTION => A::Function,
+            SQLITE_SAVEPOINT => A::Savepoint,
+            SQLITE_RECURSIVE => A::Recursive,
+            _ => A::Function,
+        }
+    }
+
+    fn imp_auth_result_to_db(
+        r: bindings::sqlite::extension::types::AuthResult,
+    ) -> db::AuthResult {
+        use bindings::sqlite::extension::types::AuthResult as A;
+        match r {
+            A::Ok => db::AuthResult::Allow,
+            A::Deny => db::AuthResult::Deny,
+            A::Ignore => db::AuthResult::Ignore,
+        }
+    }
+
+    fn imp_update_op(action: db::UpdateAction) -> bindings::sqlite::extension::types::UpdateOperation {
+        use bindings::sqlite::extension::types::UpdateOperation as U;
+        match action {
+            db::UpdateAction::Insert => U::Insert,
+            db::UpdateAction::Update => U::Update,
+            db::UpdateAction::Delete => U::Delete,
+            // SQLite only ever emits INSERT/UPDATE/DELETE codes
+            // through update_hook today; the WIT enum has no
+            // "unknown" bucket. Treat unknown as Update — the host's
+            // hook impl sees a stable shape and can ignore.
+            db::UpdateAction::Unknown => U::Update,
+        }
+    }
+
+    pub(super) fn register_host_authorizer(
+        ext_name: String,
+    ) -> Result<(), SpiSqliteError> {
+        if ext_name.is_empty() {
+            return Err(misuse_err("register-host-authorizer: empty extension name"));
+        }
+        let ext_name_cb = ext_name.clone();
+        let callback = move |action: std::os::raw::c_int,
+                             arg1: Option<String>,
+                             arg2: Option<String>,
+                             arg3: Option<String>,
+                             arg4: Option<String>|
+              -> db::AuthResult {
+            let wit_action = imp_auth_action(action);
+            // dispatch.authorize WIT signature is
+            //   (ext-name, action, arg1, arg2, database, trigger) -> auth-result
+            // sqlite's authorizer C callback receives 4 strings whose
+            // meaning depends on the action; the 3rd is conventionally
+            // "database name" and the 4th "inner trigger or view name".
+            let r = bindings::sqlink::wasm::dispatch::authorize(
+                &ext_name_cb,
+                wit_action,
+                arg1.as_deref(),
+                arg2.as_deref(),
+                arg3.as_deref(),
+                arg4.as_deref(),
+            );
+            imp_auth_result_to_db(r)
+        };
+
+        let rc = shared_conn();
+        let conn = rc.borrow();
+        conn.set_authorizer(Some(callback)).map_err(spi_db_err)?;
+        drop(conn);
+
+        HOOK_OWNERS.with(|o| {
+            o.borrow_mut().insert(HookKind::Authorizer, ext_name.clone());
+        });
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .entry(ext_name)
+                .or_default()
+                .push(HostRegistration::Hook {
+                    kind: HookKind::Authorizer,
+                });
+        });
+        Ok(())
+    }
+
+    pub(super) fn register_host_update_hook(
+        ext_name: String,
+    ) -> Result<(), SpiSqliteError> {
+        if ext_name.is_empty() {
+            return Err(misuse_err("register-host-update-hook: empty extension name"));
+        }
+        let ext_name_cb = ext_name.clone();
+        let callback = move |action: db::UpdateAction, db: &str, table: &str, rowid: i64| {
+            bindings::sqlink::wasm::dispatch::on_update(
+                &ext_name_cb,
+                imp_update_op(action),
+                db,
+                table,
+                rowid,
+            );
+        };
+
+        let rc = shared_conn();
+        let conn = rc.borrow();
+        conn.update_hook(Some(callback));
+        drop(conn);
+
+        HOOK_OWNERS.with(|o| {
+            o.borrow_mut().insert(HookKind::UpdateHook, ext_name.clone());
+        });
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .entry(ext_name)
+                .or_default()
+                .push(HostRegistration::Hook {
+                    kind: HookKind::UpdateHook,
+                });
+        });
+        Ok(())
+    }
+
+    pub(super) fn register_host_commit_hook(
+        ext_name: String,
+    ) -> Result<(), SpiSqliteError> {
+        if ext_name.is_empty() {
+            return Err(misuse_err("register-host-commit-hook: empty extension name"));
+        }
+        let ext_name_cb = ext_name.clone();
+        // SQLite's commit-hook returns non-zero to ABORT the commit.
+        // dispatch.on-commit's WIT return is `bool` where:
+        //   true  = allow commit (return 0 to sqlite)
+        //   false = abort commit (return non-zero to sqlite)
+        // db::Connection::commit_hook takes `Fn() -> bool` where the
+        // returned bool IS the "abort" flag (matches sqlite's raw
+        // semantics, not the WIT semantics). Map between the two.
+        let callback = move || -> bool {
+            let allow = bindings::sqlink::wasm::dispatch::on_commit(&ext_name_cb);
+            !allow
+        };
+
+        let rc = shared_conn();
+        let conn = rc.borrow();
+        conn.commit_hook(Some(callback));
+        drop(conn);
+
+        HOOK_OWNERS.with(|o| {
+            o.borrow_mut().insert(HookKind::CommitHook, ext_name.clone());
+        });
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .entry(ext_name)
+                .or_default()
+                .push(HostRegistration::Hook {
+                    kind: HookKind::CommitHook,
+                });
+        });
+        Ok(())
+    }
+
+    pub(super) fn register_host_rollback_hook(
+        ext_name: String,
+    ) -> Result<(), SpiSqliteError> {
+        if ext_name.is_empty() {
+            return Err(misuse_err(
+                "register-host-rollback-hook: empty extension name",
+            ));
+        }
+        let ext_name_cb = ext_name.clone();
+        let callback = move || {
+            bindings::sqlink::wasm::dispatch::on_rollback(&ext_name_cb);
+        };
+
+        let rc = shared_conn();
+        let conn = rc.borrow();
+        conn.rollback_hook(Some(callback));
+        drop(conn);
+
+        HOOK_OWNERS.with(|o| {
+            o.borrow_mut().insert(HookKind::RollbackHook, ext_name.clone());
+        });
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .entry(ext_name)
+                .or_default()
+                .push(HostRegistration::Hook {
+                    kind: HookKind::RollbackHook,
+                });
+        });
+        Ok(())
+    }
+
+    /// Clear a singleton hook slot on the shared connection. Only
+    /// clears the slot if `ext_name` is the current owner — if
+    /// another extension's register-host-* call came in between
+    /// the registration and unregister-extension, the new owner's
+    /// trampoline stays installed.
+    fn clear_hook_if_owner(conn: &db::Connection, kind: HookKind, ext_name: &str) {
+        let is_owner = HOOK_OWNERS.with(|o| {
+            o.borrow()
+                .get(&kind)
+                .is_some_and(|owner| owner == ext_name)
+        });
+        if !is_owner {
+            return;
+        }
+        match kind {
+            HookKind::Authorizer => {
+                let _ = conn.set_authorizer(None::<
+                    fn(
+                        std::os::raw::c_int,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                        Option<String>,
+                    ) -> db::AuthResult,
+                >);
+            }
+            HookKind::UpdateHook => {
+                conn.update_hook(None::<fn(db::UpdateAction, &str, &str, i64)>);
+            }
+            HookKind::CommitHook => {
+                conn.commit_hook(None::<fn() -> bool>);
+            }
+            HookKind::RollbackHook => {
+                conn.rollback_hook(None::<fn()>);
+            }
+        }
+        HOOK_OWNERS.with(|o| {
+            o.borrow_mut().remove(&kind);
+        });
+    }
+
     pub(super) fn unregister_extension(ext_name: String) {
         let entries = REGISTRY.with(|r| r.borrow_mut().remove(&ext_name));
         let Some(entries) = entries else {
@@ -1389,6 +1689,9 @@ mod host_scalars {
                 }
                 HostRegistration::Collation { name } => {
                     let _ = conn.remove_collation(&name);
+                }
+                HostRegistration::Hook { kind } => {
+                    clear_hook_if_owner(&conn, kind, &ext_name);
                 }
             }
         }
@@ -1420,6 +1723,22 @@ mod host_scalars {
             collation_id: u64,
         ) -> Result<(), SpiSqliteError> {
             register_host_collation(ext_name, name, collation_id)
+        }
+
+        fn register_host_authorizer(ext_name: String) -> Result<(), SpiSqliteError> {
+            register_host_authorizer(ext_name)
+        }
+
+        fn register_host_update_hook(ext_name: String) -> Result<(), SpiSqliteError> {
+            register_host_update_hook(ext_name)
+        }
+
+        fn register_host_commit_hook(ext_name: String) -> Result<(), SpiSqliteError> {
+            register_host_commit_hook(ext_name)
+        }
+
+        fn register_host_rollback_hook(ext_name: String) -> Result<(), SpiSqliteError> {
+            register_host_rollback_hook(ext_name)
         }
 
         fn unregister_extension(ext_name: String) {
