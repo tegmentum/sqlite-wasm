@@ -1,0 +1,57 @@
+package sqlink:wasm@0.1.0;
+
+/// Host  sqlite-lib bridge for registering host-resident
+/// scalar functions on sqlite-lib's internal default connection.
+///
+/// Why this exists: in the native scenario the host owns the
+/// `sqlite3*` connection that serves both `spi.execute` and
+/// `spi-loader.register-scalar`, so `sqlite3_create_function_v2`
+/// from register-scalar is immediately visible to the SQL the cli
+/// runs afterwards. In the composed `cli + sqlite-lib` browser
+/// scenario the cli's `spi.execute` is served by sqlite-lib's
+/// in-WASM connection but `spi-loader.register-scalar` is served
+/// by the JS host  the JS host has no path to inject a function
+/// into sqlite-lib's connection. This interface gives the host
+/// that path.
+///
+/// Usage from the JS host's `spi-loader.register-scalar` impl:
+///
+///   1. Record the (ext-name, func-id) in the JS registry so
+///      `dispatch.scalar-call` can route the call back.
+///   2. Call `dispatch-bridge.register-host-scalar(ext-name, name,
+///      num-args, func-id)`. Sqlite-lib installs a native
+///      `sqlite3_create_function_v2` trampoline on its connection
+///      whose body calls back out via the imported
+///      `dispatch.scalar-call(ext-name, func-id, args)`.
+///   3. When the cli later runs SQL that invokes `name`, sqlite-lib's
+///      trampoline fires, the imported `dispatch.scalar-call`
+///      re-enters the host, the host's JS impl looks up the
+///      registration, runs the transpiled extension's
+///      `scalar-function.call`, and returns the result.
+///
+/// On `.unload`, the JS host calls `unregister-extension(ext-name)`
+/// and sqlite-lib drops every trampoline keyed under that ext-name.
+interface dispatch-bridge {
+    use sqlite:extension/types@0.1.0.{sqlite-error};
+
+    /// Register a host-resident scalar function on sqlite-lib's
+    /// internal connection. When SQL invokes `name`, sqlite-lib
+    /// calls back to the host via the imported
+    /// `dispatch.scalar-call(ext-name, func-id, args)`.
+    ///
+    /// `num-args` follows SQLite's convention: -1 = variadic,
+    /// otherwise the fixed arity. `func-id` is the manifest-
+    /// assigned identifier the host uses to dispatch.
+    register-host-scalar: func(
+        ext-name: string,
+        name: string,
+        num-args: s32,
+        func-id: u64,
+    ) -> result<_, sqlite-error>;
+
+    /// Drop every host-scalar registration belonging to `ext-name`.
+    /// Mirrors `spi-loader.unregister-extension` on the wasm side.
+    /// Idempotent: unregistering an extension with no registrations
+    /// is a no-op.
+    unregister-extension: func(ext-name: string);
+}

@@ -114,6 +114,13 @@ world sqlite-library {
     export low-level;
     export high-level;
     export library;
+    /// Host-resident scalar registration bridge. The JS host calls
+    /// `dispatch-bridge.register-host-scalar` from its
+    /// `spi-loader.register-scalar` impl, sqlite-lib installs a
+    /// `sqlite3_create_function_v2` trampoline whose body re-enters
+    /// the host via the imported `dispatch.scalar-call`. See
+    /// `wit/dispatch-bridge.wit` for the full lifecycle.
+    export dispatch-bridge;
 
     import extension-loader;
     import dispatch;
