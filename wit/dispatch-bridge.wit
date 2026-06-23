@@ -86,9 +86,75 @@ interface dispatch-bridge {
         collation-id: u64,
     ) -> result<_, sqlite-error>;
 
-    /// Drop every host registration (scalar, aggregate, collation)
-    /// belonging to `ext-name`. Mirrors `spi-loader.unregister-
-    /// extension` on the wasm side. Idempotent: unregistering an
-    /// extension with no registrations is a no-op.
+    /// Install an authorizer trampoline on sqlite-lib's internal
+    /// connection routed to `ext-name`. SQLite invokes the
+    /// authorizer during statement compilation; the trampoline
+    /// re-enters the host via the imported `dispatch.authorize`,
+    /// passes through the standard auth-action / arg1 / arg2 /
+    /// database / trigger tuple, and maps the host's `auth-result`
+    /// back to `SQLITE_OK` / `SQLITE_DENY` / `SQLITE_IGNORE`.
+    ///
+    /// SQLite allows only one authorizer per connection; v1
+    /// semantics are last-write-wins. Re-registering for the same
+    /// `ext-name` replaces the previous trampoline. Calling for a
+    /// different `ext-name` while one is active overwrites it; the
+    /// host is responsible for fan-out if multiple extensions
+    /// declared `has-authorizer`.
+    ///
+    /// Cleared by `unregister-extension(ext-name)`: the trampoline
+    /// is removed when the matching ext-name is unregistered. If
+    /// another extension's trampoline is currently active,
+    /// unregistering a stale ext-name is a no-op.
+    register-host-authorizer: func(
+        ext-name: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Install an update-hook trampoline on sqlite-lib's internal
+    /// connection routed to `ext-name`. SQLite fires update hooks
+    /// AFTER the row write commits to the page cache for
+    /// INSERT/UPDATE/DELETE on rowid tables; the trampoline
+    /// re-enters the host via the imported `dispatch.on-update`
+    /// with `(operation, database, table, rowid)`. No return value
+    /// — update hooks cannot veto.
+    ///
+    /// SQLite allows only one update-hook per connection; v1
+    /// semantics are last-write-wins. Cleared by
+    /// `unregister-extension(ext-name)`.
+    register-host-update-hook: func(
+        ext-name: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Install a commit-hook trampoline on sqlite-lib's internal
+    /// connection routed to `ext-name`. SQLite fires the commit
+    /// hook immediately before commit; if the host's
+    /// `dispatch.on-commit` returns `false` the commit converts to
+    /// a rollback (matches SQLite's "non-zero abort" semantics —
+    /// the trampoline maps `false` to a non-zero return).
+    ///
+    /// SQLite allows only one commit-hook per connection; v1
+    /// semantics are last-write-wins. Cleared by
+    /// `unregister-extension(ext-name)`.
+    register-host-commit-hook: func(
+        ext-name: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Install a rollback-hook trampoline on sqlite-lib's internal
+    /// connection routed to `ext-name`. SQLite fires the rollback
+    /// hook after rollback completes; the trampoline re-enters the
+    /// host via the imported `dispatch.on-rollback(ext-name)`. No
+    /// return value, no veto.
+    ///
+    /// SQLite allows only one rollback-hook per connection; v1
+    /// semantics are last-write-wins. Cleared by
+    /// `unregister-extension(ext-name)`.
+    register-host-rollback-hook: func(
+        ext-name: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Drop every host registration (scalar, aggregate, collation,
+    /// authorizer, update/commit/rollback hook) belonging to
+    /// `ext-name`. Mirrors `spi-loader.unregister-extension` on
+    /// the wasm side. Idempotent: unregistering an extension with
+    /// no registrations is a no-op.
     unregister-extension: func(ext-name: string);
 }
