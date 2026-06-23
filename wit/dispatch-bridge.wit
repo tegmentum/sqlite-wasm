@@ -49,9 +49,46 @@ interface dispatch-bridge {
         func-id: u64,
     ) -> result<_, sqlite-error>;
 
-    /// Drop every host-scalar registration belonging to `ext-name`.
-    /// Mirrors `spi-loader.unregister-extension` on the wasm side.
-    /// Idempotent: unregistering an extension with no registrations
-    /// is a no-op.
+    /// Register a host-resident aggregate function on sqlite-lib's
+    /// internal connection. When SQL invokes `name`, sqlite-lib
+    /// installs xStep / xFinal slots whose trampolines re-enter
+    /// the host via the imported `dispatch.aggregate-step` and
+    /// `dispatch.aggregate-finalize`. When `is-window` is true,
+    /// the function is registered as a window function via
+    /// `sqlite3_create_window_function`, wiring xValue + xInverse
+    /// to `dispatch.aggregate-value` and `dispatch.aggregate-inverse`
+    /// as well.
+    ///
+    /// Per-aggregation state lives in `sqlite3_aggregate_context`:
+    /// the wasm-side trampoline allocates a fresh `context-id`
+    /// counter on the first xStep for each aggregation and threads
+    /// it through every subsequent dispatch call for that
+    /// aggregation. The host's dispatch impl uses `context-id` to
+    /// key any per-aggregation state.
+    register-host-aggregate: func(
+        ext-name: string,
+        name: string,
+        num-args: s32,
+        func-id: u64,
+        is-window: bool,
+    ) -> result<_, sqlite-error>;
+
+    /// Register a host-resident collation on sqlite-lib's internal
+    /// connection. When SQL compares two strings under `name`,
+    /// sqlite-lib calls back to the host via the imported
+    /// `dispatch.collation-compare(ext-name, collation-id, a, b)`,
+    /// which routes to the loaded extension's compare callback.
+    /// Stateless: there's no per-comparison context, so the
+    /// trampoline just marshals args and forwards the result.
+    register-host-collation: func(
+        ext-name: string,
+        name: string,
+        collation-id: u64,
+    ) -> result<_, sqlite-error>;
+
+    /// Drop every host registration (scalar, aggregate, collation)
+    /// belonging to `ext-name`. Mirrors `spi-loader.unregister-
+    /// extension` on the wasm side. Idempotent: unregistering an
+    /// extension with no registrations is a no-op.
     unregister-extension: func(ext-name: string);
 }
