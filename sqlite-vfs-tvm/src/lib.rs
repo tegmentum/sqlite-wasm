@@ -56,13 +56,15 @@ use parking_lot::Mutex;
 
 pub mod storage;
 
-// On wasm32 the file storage is a multi-memory pool-backed
+// On wasm32 the file storage is normally a multi-memory pool-backed
 // storage: file bytes live in pool 2 of the `tvm-guest-mm`
 // shell, accessed through the `tvm-guest-mm-rt` dispatch
 // helpers. The in-proc Vec<u8> backend stays the default on
 // native (where the pool helpers don't exist) for the
-// unit-test path.
-#[cfg(target_arch = "wasm32")]
+// unit-test path. The `single-memory` feature forces the in-proc
+// backend even on wasm32; this is the browser flavor where jco
+// can't yet transpile multi-memory inner modules.
+#[cfg(all(target_arch = "wasm32", not(feature = "single-memory")))]
 pub mod multi_memory_storage;
 
 use storage::FileStorage;
@@ -71,12 +73,12 @@ use storage::FileStorage;
 /// TVM-backed variant fails to create its region; the InProc
 /// variant is infallible. Trampoline maps the error to
 /// SQLITE_IOERR.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "single-memory"))]
 fn make_storage() -> Result<Box<dyn FileStorage>, c_int> {
     Ok(Box::new(storage::InProcStorage::new()))
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "single-memory")))]
 fn make_storage() -> Result<Box<dyn FileStorage>, c_int> {
     match multi_memory_storage::MultiMemoryStorage::new() {
         Ok(s) => Ok(Box::new(s)),
