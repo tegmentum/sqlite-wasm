@@ -2206,6 +2206,82 @@ mod tests {
     }
 
     #[test]
+    fn wal_hook_install_only_in_memory() {
+        // Sanity: installing a wal_hook on an in-memory db (WAL not
+        // active) must not crash; the hook never fires but install
+        // itself goes through sqlite3_wal_hook(callback, user_data).
+        let c = Connection::open_in_memory().unwrap();
+        c.wal_hook(Some(|_db: &str, _n: i32| 0));
+        drop(c);
+    }
+
+    #[test]
+    fn wal_hook_fires_after_wal_commit() {
+        // WAL mode requires a file-backed db (sqlite refuses WAL for
+        // `:memory:`). Use a tempfile so the test stays hermetic.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "sqlink-wal-hook-test-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let cleanup = |p: &std::path::Path| {
+            let _ = std::fs::remove_file(p);
+            let _ = std::fs::remove_file(format!("{}-wal", p.display()));
+            let _ = std::fs::remove_file(format!("{}-shm", p.display()));
+            let _ = std::fs::remove_file(format!("{}-journal", p.display()));
+        };
+        cleanup(&path);
+
+        // Use a thread-local counter to dodge any Send/Sync subtleties
+        // around capturing a Rc<RefCell<...>> through the trampoline.
+        // The native libsqlite3-sys + system VFS run wal_hook on the
+        // same thread that called execute_batch, so a thread_local is
+        // safe here.
+        thread_local! {
+            static WAL_LOG: std::cell::RefCell<Vec<(String, i32)>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        WAL_LOG.with(|l| l.borrow_mut().clear());
+
+        {
+            let c = Connection::open(path.to_str().unwrap(), OpenFlags::DEFAULT)
+                .unwrap();
+            // Toggle WAL. Native libsqlite3-sys + system VFS support
+            // WAL; the in-WASM tvm-vfs does not (iVersion=1) so this
+            // test is native-only as a substrate proof.
+            c.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+
+            c.wal_hook(Some(|db_name: &str, n_frames: i32| -> i32 {
+                WAL_LOG.with(|l| {
+                    l.borrow_mut().push((db_name.to_string(), n_frames));
+                });
+                0 // SQLITE_OK
+            }));
+
+            c.execute_batch(
+                "CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3);",
+            )
+            .unwrap();
+        }
+
+        let captured: Vec<(String, i32)> =
+            WAL_LOG.with(|l| l.borrow().clone());
+        assert!(
+            !captured.is_empty(),
+            "wal_hook never fired despite WAL journal_mode + DDL/DML traffic"
+        );
+        for (db_name, n_frames) in captured.iter() {
+            assert_eq!(db_name, "main");
+            assert!(*n_frames >= 0);
+        }
+        cleanup(&path);
+    }
+
+    #[test]
     fn authorizer_denies_specific_table() {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch("CREATE TABLE secret(x); CREATE TABLE public(y);")
