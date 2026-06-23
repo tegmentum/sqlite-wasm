@@ -8,6 +8,16 @@ description = "Programmatic SQLite-in-WASM library. Targets the sqlite-library w
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# Browser flavor: force pcache-tvm + vfs-tvm onto the in-proc
+# backend even on wasm32, so the resulting cdylib has exactly one
+# linear memory and can be jco-transpiled. The default (multi-
+# memory) build is what scenarios 1 + 2 ship on native wasmtime.
+single-memory = [
+    "sqlite-pcache-tvm/single-memory",
+    "sqlite-vfs-tvm/single-memory",
+]
+
 [dependencies]
 # Sync wit-bindgen — no async needed; the library world's imports
 # are extension-loader + dispatch, both straight host calls.
