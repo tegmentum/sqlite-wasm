@@ -1121,15 +1121,16 @@ mod host_scalars {
         Hook { kind: HookKind },
     }
 
-    /// The four singleton-per-connection hook slots. SQLite allows
-    /// only one of each per connection; v1 dispatch-bridge semantics
-    /// are last-write-wins.
+    /// The singleton-per-connection hook slots. SQLite allows only
+    /// one of each per connection; v1 dispatch-bridge semantics are
+    /// last-write-wins.
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     pub(super) enum HookKind {
         Authorizer,
         UpdateHook,
         CommitHook,
         RollbackHook,
+        WalHook,
     }
 
     thread_local! {
@@ -1629,6 +1630,52 @@ mod host_scalars {
         Ok(())
     }
 
+    pub(super) fn register_host_wal_hook(
+        ext_name: String,
+        hook_id: u64,
+    ) -> Result<(), SpiSqliteError> {
+        if ext_name.is_empty() {
+            return Err(misuse_err(
+                "register-host-wal-hook: empty extension name",
+            ));
+        }
+        let ext_name_cb = ext_name.clone();
+        // db::Connection::wal_hook takes `Fn(&str, i32) -> i32` and
+        // returns the raw sqlite result code. dispatch.wal-hook
+        // matches that contract directly (returns s32, SQLITE_OK
+        // for normal continuation).
+        let callback = move |db_name: &str, n_frames: i32| -> i32 {
+            // n_frames is a C int from sqlite; the dispatch WIT signature
+            // uses u32 (frames count is always non-negative in practice).
+            // Clamp negative values to 0 defensively.
+            let frames_u32 = u32::try_from(n_frames).unwrap_or(0);
+            bindings::sqlink::wasm::dispatch::wal_hook(
+                &ext_name_cb,
+                hook_id,
+                db_name,
+                frames_u32,
+            )
+        };
+
+        let rc = shared_conn();
+        let conn = rc.borrow();
+        conn.wal_hook(Some(callback));
+        drop(conn);
+
+        HOOK_OWNERS.with(|o| {
+            o.borrow_mut().insert(HookKind::WalHook, ext_name.clone());
+        });
+        REGISTRY.with(|r| {
+            r.borrow_mut()
+                .entry(ext_name)
+                .or_default()
+                .push(HostRegistration::Hook {
+                    kind: HookKind::WalHook,
+                });
+        });
+        Ok(())
+    }
+
     /// Clear a singleton hook slot on the shared connection. Only
     /// clears the slot if `ext_name` is the current owner — if
     /// another extension's register-host-* call came in between
@@ -1663,6 +1710,9 @@ mod host_scalars {
             }
             HookKind::RollbackHook => {
                 conn.rollback_hook(None::<fn()>);
+            }
+            HookKind::WalHook => {
+                conn.wal_hook(None::<fn(&str, i32) -> i32>);
             }
         }
         HOOK_OWNERS.with(|o| {
@@ -1739,6 +1789,13 @@ mod host_scalars {
 
         fn register_host_rollback_hook(ext_name: String) -> Result<(), SpiSqliteError> {
             register_host_rollback_hook(ext_name)
+        }
+
+        fn register_host_wal_hook(
+            ext_name: String,
+            hook_id: u64,
+        ) -> Result<(), SpiSqliteError> {
+            register_host_wal_hook(ext_name, hook_id)
         }
 
         fn unregister_extension(ext_name: String) {

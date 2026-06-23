@@ -1745,6 +1745,57 @@ impl Connection {
             unsafe { drop(Box::from_raw(prev as *mut F)) };
         }
     }
+
+    /// Set the WAL hook. The callback fires AFTER a WAL commit has
+    /// just appended `n_frames` frames to the WAL for database
+    /// `db_name`. Return SQLITE_OK (0) for normal continuation or any
+    /// other SQLite result code to propagate as an error to the
+    /// calling SQL statement.
+    ///
+    /// SQLite allows only one wal-hook per connection; passing
+    /// `Some(...)` replaces the previous installation. `None` removes.
+    pub fn wal_hook<F>(&self, hook: Option<F>)
+    where
+        F: Fn(&str, i32) -> i32 + 'static,
+    {
+        unsafe extern "C" fn call_boxed<F>(
+            p_arg: *mut c_void,
+            _db: *mut ffi::sqlite3,
+            db_name: *const c_char,
+            n_frames: c_int,
+        ) -> c_int
+        where
+            F: Fn(&str, i32) -> i32,
+        {
+            let boxed = p_arg as *mut F;
+            if boxed.is_null() {
+                return 0;
+            }
+            let db_s = if db_name.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(db_name).to_string_lossy().into_owned()
+            };
+            (*boxed)(&db_s, n_frames)
+        }
+        let (cb, user_data) = match hook {
+            Some(f) => {
+                let boxed: *mut F = Box::into_raw(Box::new(f));
+                let cb: unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut ffi::sqlite3,
+                    *const c_char,
+                    c_int,
+                ) -> c_int = call_boxed::<F>;
+                (Some(cb), boxed as *mut c_void)
+            }
+            None => (None, ptr::null_mut()),
+        };
+        let prev = unsafe { ffi::sqlite3_wal_hook(self.raw, cb, user_data) };
+        if !prev.is_null() {
+            unsafe { drop(Box::from_raw(prev as *mut F)) };
+        }
+    }
 }
 
 // ---------------------------------------------------------------
