@@ -402,6 +402,172 @@ unsafe extern "C" fn io_device_characteristics(_file: *mut sqlite3_file) -> c_in
     ffi::SQLITE_IOCAP_ATOMIC | ffi::SQLITE_IOCAP_SAFE_APPEND | ffi::SQLITE_IOCAP_SEQUENTIAL
 }
 
+// ---------------------------------------------------------------
+// Shared-memory IO methods (xShm*) — back the WAL index.
+// ---------------------------------------------------------------
+
+unsafe extern "C" fn io_shm_map(
+    file: *mut sqlite3_file,
+    region_idx: c_int,
+    region_size: c_int,
+    extend: c_int,
+    pp_out: *mut *mut c_void,
+) -> c_int {
+    // SQLite asks "give me a pointer to region N, size region_size,
+    // creating it if `extend` is true." Allocate (or look up) a
+    // heap-owned Box<[u8]> per region. The pointer we hand back is
+    // stable for the file's lifetime because:
+    //   - `regions` is a Vec<Option<Box<[u8]>>>; growing the Vec
+    //     reallocates the outer storage of the Vec, NOT the
+    //     heap-owned Box payloads. The bytes the pointer addresses
+    //     stay put.
+    //   - Boxes are freed only at xShmUnmap (i.e. at file close).
+    if pp_out.is_null() || file.is_null() || region_idx < 0 || region_size <= 0 {
+        return ffi::SQLITE_IOERR;
+    }
+    *pp_out = ptr::null_mut();
+
+    let tf = file as *mut TvmFile;
+    if (*tf).inner.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    let inner = &mut *(*tf).inner;
+    let shm = inner.shm.get_or_insert_with(|| Box::new(ShmState::new()));
+    let idx = region_idx as usize;
+
+    // Grow the regions Vec sparsely (None) up to and including idx.
+    if idx >= shm.regions.len() {
+        shm.regions.resize_with(idx + 1, || None);
+    }
+
+    if shm.regions[idx].is_some() {
+        // SAFETY: just confirmed Some. Hand back the address of
+        // the boxed slice's payload bytes.
+        let r = shm.regions[idx].as_mut().unwrap();
+        *pp_out = r.as_mut_ptr() as *mut c_void;
+        return ffi::SQLITE_OK;
+    }
+
+    if extend == 0 {
+        // SQLite asked "does this region exist already?" and the
+        // answer is no. Returning SQLITE_OK with a NULL pointer
+        // is the documented signal — SQLite then knows the region
+        // doesn't exist yet without us synthesizing one.
+        return ffi::SQLITE_OK;
+    }
+
+    let bytes = vec![0u8; region_size as usize].into_boxed_slice();
+    shm.regions[idx] = Some(bytes);
+    *pp_out = shm.regions[idx].as_mut().unwrap().as_mut_ptr() as *mut c_void;
+    ffi::SQLITE_OK
+}
+
+unsafe extern "C" fn io_shm_lock(
+    file: *mut sqlite3_file,
+    offset: c_int,
+    n: c_int,
+    flags: c_int,
+) -> c_int {
+    // SQLite uses 8 lock slots (SQLITE_SHM_NLOCK) on the shm file.
+    // `offset` is the starting slot, `n` the count. `flags` is a
+    // bitmask: (LOCK | UNLOCK) × (SHARED | EXCLUSIVE).
+    //
+    // Single-process means no real contention is possible. We
+    // still track per-slot state so SQLite's invariants check out:
+    // a SHARED lock can stack on SHARED but not on EXCLUSIVE;
+    // EXCLUSIVE requires UNLOCKED.
+    if file.is_null() || offset < 0 || n <= 0 || offset + n > 8 {
+        return ffi::SQLITE_IOERR;
+    }
+    let tf = file as *mut TvmFile;
+    if (*tf).inner.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    let inner = &mut *(*tf).inner;
+    let shm = inner.shm.get_or_insert_with(|| Box::new(ShmState::new()));
+
+    let is_lock = (flags & ffi::SQLITE_SHM_LOCK) != 0;
+    let is_unlock = (flags & ffi::SQLITE_SHM_UNLOCK) != 0;
+    let is_shared = (flags & ffi::SQLITE_SHM_SHARED) != 0;
+    let is_exclusive = (flags & ffi::SQLITE_SHM_EXCLUSIVE) != 0;
+
+    if is_lock == is_unlock {
+        // Exactly one of LOCK / UNLOCK must be set.
+        return ffi::SQLITE_IOERR;
+    }
+    if is_shared == is_exclusive {
+        // Exactly one of SHARED / EXCLUSIVE must be set.
+        return ffi::SQLITE_IOERR;
+    }
+
+    let start = offset as usize;
+    let end = (offset + n) as usize;
+
+    if is_lock {
+        // Two-pass: validate first, then mutate. SQLite expects
+        // an all-or-nothing lock acquisition (any slot in the
+        // range busy → return SQLITE_BUSY without partial state).
+        for i in start..end {
+            match (is_exclusive, shm.locks[i]) {
+                (true, ShmLockState::Unlocked) => {}
+                (false, ShmLockState::Unlocked | ShmLockState::Shared(_)) => {}
+                _ => return ffi::SQLITE_BUSY,
+            }
+        }
+        for i in start..end {
+            shm.locks[i] = if is_exclusive {
+                ShmLockState::Exclusive
+            } else {
+                match shm.locks[i] {
+                    ShmLockState::Unlocked => ShmLockState::Shared(1),
+                    ShmLockState::Shared(c) => ShmLockState::Shared(c + 1),
+                    ShmLockState::Exclusive => unreachable!(),
+                }
+            };
+        }
+    } else {
+        // UNLOCK. Drop exclusive → unlocked, or decrement shared
+        // (last shared holder → unlocked). Releasing an already
+        // unlocked slot is documented as a no-op (SQLite uses
+        // unlock-on-shutdown without prior knowledge of state).
+        for i in start..end {
+            shm.locks[i] = match shm.locks[i] {
+                ShmLockState::Exclusive => ShmLockState::Unlocked,
+                ShmLockState::Shared(1) | ShmLockState::Shared(0) => ShmLockState::Unlocked,
+                ShmLockState::Shared(c) => ShmLockState::Shared(c - 1),
+                ShmLockState::Unlocked => ShmLockState::Unlocked,
+            };
+        }
+    }
+    ffi::SQLITE_OK
+}
+
+unsafe extern "C" fn io_shm_barrier(_file: *mut sqlite3_file) {
+    // Memory-ordering fence. Single-threaded inside the wasm guest
+    // makes this strictly cosmetic, but SeqCst documents intent
+    // and is free at the wasm-runtime level.
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+unsafe extern "C" fn io_shm_unmap(file: *mut sqlite3_file, _delete_flag: c_int) -> c_int {
+    // Drop all shm regions for this file. SQLite calls this exactly
+    // once per file at close (the wal-index's owning open). The
+    // `delete_flag` distinguishes "remove the underlying shm file"
+    // from "release this open's mapping" — we have no persistent
+    // shm file (it lives in-process memory), so both reduce to
+    // dropping the regions Vec.
+    if file.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    let tf = file as *mut TvmFile;
+    if (*tf).inner.is_null() {
+        return ffi::SQLITE_OK;
+    }
+    let inner = &mut *(*tf).inner;
+    inner.shm = None;
+    ffi::SQLITE_OK
+}
+
 #[repr(transparent)]
 struct IoMethods(sqlite3_io_methods);
 unsafe impl Sync for IoMethods {}
