@@ -573,7 +573,13 @@ struct IoMethods(sqlite3_io_methods);
 unsafe impl Sync for IoMethods {}
 
 static IO_METHODS: IoMethods = IoMethods(sqlite3_io_methods {
-    iVersion: 1,
+    // iVersion=2 turns on the xShm* family that SQLite needs to
+    // set up the wal-index when a connection enters WAL journal
+    // mode. The xFetch / xUnfetch (mmap) fields stay None — we
+    // don't expose mmap-backed I/O — but iVersion=2 only requires
+    // the shm slots to be valid; iVersion=3 is the floor for
+    // requiring xFetch / xUnfetch to be set.
+    iVersion: 2,
     xClose: Some(io_close),
     xRead: Some(io_read),
     xWrite: Some(io_write),
@@ -586,14 +592,14 @@ static IO_METHODS: IoMethods = IoMethods(sqlite3_io_methods {
     xFileControl: Some(io_file_control),
     xSectorSize: Some(io_sector_size),
     xDeviceCharacteristics: Some(io_device_characteristics),
-    // iVersion=1 stops here  the v2/v3 fields (xShmMap,
-    // xFetch, etc.) require iVersion bumps and we don't
-    // expose them. SQLite tolerates the iVersion=1 shape for
-    // non-WAL, non-mmap modes.
-    xShmMap: None,
-    xShmLock: None,
-    xShmBarrier: None,
-    xShmUnmap: None,
+    xShmMap: Some(io_shm_map),
+    xShmLock: Some(io_shm_lock),
+    xShmBarrier: Some(io_shm_barrier),
+    xShmUnmap: Some(io_shm_unmap),
+    // xFetch / xUnfetch are mmap I/O, gated on iVersion=3. We
+    // don't support memory-mapped pages (everything routes
+    // through xRead / xWrite) so these stay None and we cap at
+    // iVersion=2.
     xFetch: None,
     xUnfetch: None,
 });
