@@ -451,6 +451,95 @@ impl WalFramesGuest for SqliteLib {
 }
 
 // =========================================================================
+// sqlite:extension/s3-base
+// =========================================================================
+//
+// Browser-side stubs for the host-resident S3 SPI. The composed
+// runtime exports the s3-base interface so worlds that import it
+// (every world, post #440) link cleanly against sqlite-lib, but
+// every method returns a structured "not implemented" error  the
+// real impl waits for the JS polyfill bridge (fetch + SigV4)
+// follow-up to #437. The wal-archive extension's primary off-box
+// sink ships native-first.
+//
+// The error variant we emit is `internal(...)` rather than a brand-
+// new "not-implemented" variant so the browser-side stub stays
+// strictly inside the WIT contract  callers can match on the
+// existing error shape and don't need to special-case browser
+// deployment.
+
+use bindings::exports::sqlite::extension::s3_base::{
+    Guest as S3BaseGuest, S3Credentials, S3EndpointConfig, S3Error, S3GetObjectOptions,
+    S3GetObjectOutput, S3HeadObjectOutput, S3ListObjectsOptions, S3ListObjectsOutput,
+    S3PutObjectOptions, S3PutObjectOutput,
+};
+
+const S3_BROWSER_STUB: &str =
+    "s3-base: not implemented in sqlite-lib browser-composed runtime \
+     (pending fetch+SigV4 polyfill bridge follow-up to #437)";
+
+impl S3BaseGuest for SqliteLib {
+    fn get_object(
+        _endpoint: S3EndpointConfig,
+        _credentials: S3Credentials,
+        _bucket: String,
+        _key: String,
+        _options: Option<S3GetObjectOptions>,
+    ) -> Result<S3GetObjectOutput, S3Error> {
+        Err(S3Error::Internal(S3_BROWSER_STUB.to_string()))
+    }
+
+    fn put_object(
+        _endpoint: S3EndpointConfig,
+        _credentials: S3Credentials,
+        _bucket: String,
+        _key: String,
+        _body: Vec<u8>,
+        _options: Option<S3PutObjectOptions>,
+    ) -> Result<S3PutObjectOutput, S3Error> {
+        Err(S3Error::Internal(S3_BROWSER_STUB.to_string()))
+    }
+
+    fn delete_object(
+        _endpoint: S3EndpointConfig,
+        _credentials: S3Credentials,
+        _bucket: String,
+        _key: String,
+    ) -> Result<(), S3Error> {
+        Err(S3Error::Internal(S3_BROWSER_STUB.to_string()))
+    }
+
+    fn head_object(
+        _endpoint: S3EndpointConfig,
+        _credentials: S3Credentials,
+        _bucket: String,
+        _key: String,
+    ) -> Result<S3HeadObjectOutput, S3Error> {
+        Err(S3Error::Internal(S3_BROWSER_STUB.to_string()))
+    }
+
+    fn list_objects(
+        _endpoint: S3EndpointConfig,
+        _credentials: S3Credentials,
+        _bucket: String,
+        _options: Option<S3ListObjectsOptions>,
+    ) -> Result<S3ListObjectsOutput, S3Error> {
+        Err(S3Error::Internal(S3_BROWSER_STUB.to_string()))
+    }
+
+    fn copy_object(
+        _endpoint: S3EndpointConfig,
+        _credentials: S3Credentials,
+        _source_bucket: String,
+        _source_key: String,
+        _dest_bucket: String,
+        _dest_key: String,
+    ) -> Result<S3PutObjectOutput, S3Error> {
+        Err(S3Error::Internal(S3_BROWSER_STUB.to_string()))
+    }
+}
+
+// =========================================================================
 // sqlink:wasm/low-level
 // =========================================================================
 
@@ -920,6 +1009,7 @@ mod lib_load {
             LibCap::Http => pol::Capability::Http,
             LibCap::Dns => pol::Capability::Dns,
             LibCap::WalFrames => pol::Capability::WalFrames,
+            LibCap::S3 => pol::Capability::S3,
         }
     }
 
@@ -938,6 +1028,7 @@ mod lib_load {
             pol::Capability::Http => LibCap::Http,
             pol::Capability::Dns => LibCap::Dns,
             pol::Capability::WalFrames => LibCap::WalFrames,
+            pol::Capability::S3 => LibCap::S3,
         }
     }
 
