@@ -407,6 +407,50 @@ impl SpiGuest for SqliteLib {
 }
 
 // =========================================================================
+// sqlite:extension/wal-frames
+// =========================================================================
+//
+// Browser-side this is the wasm-component (sqlite-lib) impl of the
+// wal-frames host interface. The composed runtime imports it as
+// part of the widened `minimal` world; the native sqlink loader
+// has its own impl that reads the host-side `<db_path>-wal`
+// directly (see host/src/lib.rs).
+//
+// Until vfs-tvm grows WAL support (#437), browser-side reads of
+// the WAL file have nowhere to land  the data lives in TVM
+// memory, not on a filesystem the wasm code can `std::fs::read`.
+// We honor the WIT contract by returning the documented sentinel
+// (None / SQLITE_NOTFOUND) rather than panicking, which keeps
+// extensions that import wal-frames loadable in the browser even
+// before #437 ships.
+
+use bindings::exports::sqlite::extension::wal_frames::Guest as WalFramesGuest;
+
+impl WalFramesGuest for SqliteLib {
+    fn get_wal_header(_db_name: String) -> Result<Option<Vec<u8>>, SpiSqliteError> {
+        // No WAL sidecar reachable from inside the wasm sandbox.
+        // The native sqlink host returns the real bytes; the
+        // browser-composed runtime returns None until vfs-tvm
+        // grows the matching read path (#437).
+        Ok(None)
+    }
+
+    fn read_frames(
+        _db_name: String,
+        _start_frame: u32,
+        _n_frames: u32,
+    ) -> Result<Vec<u8>, SpiSqliteError> {
+        Err(SpiSqliteError {
+            code: 12, // SQLITE_NOTFOUND
+            extended_code: 12,
+            message: "wal-frames.read-frames: no WAL access from sqlite-lib \
+                      browser-side composed runtime (pending vfs-tvm #437)"
+                .to_string(),
+        })
+    }
+}
+
+// =========================================================================
 // sqlink:wasm/low-level
 // =========================================================================
 
@@ -875,6 +919,7 @@ mod lib_load {
             LibCap::Encoding => pol::Capability::Encoding,
             LibCap::Http => pol::Capability::Http,
             LibCap::Dns => pol::Capability::Dns,
+            LibCap::WalFrames => pol::Capability::WalFrames,
         }
     }
 
@@ -892,6 +937,7 @@ mod lib_load {
             pol::Capability::Encoding => LibCap::Encoding,
             pol::Capability::Http => LibCap::Http,
             pol::Capability::Dns => LibCap::Dns,
+            pol::Capability::WalFrames => LibCap::WalFrames,
         }
     }
 

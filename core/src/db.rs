@@ -620,6 +620,31 @@ impl Connection {
         Ok(s)
     }
 
+    /// `sqlite3_db_filename(db_name)`. Returns the on-disk filename
+    /// SQLite opened the named database against (typically "main",
+    /// "temp", or an ATTACH alias). Empty string for in-memory or
+    /// temp databases. None if `db_name` is not attached.
+    ///
+    /// Used by the wal-frames host SPI dispatcher to locate the
+    /// `<db_path>-wal` sidecar on disk without an extra round-trip
+    /// through SQL (a `SELECT file FROM pragma_database_list` would
+    /// work but adds prepared-statement churn for what is one
+    /// `const char *` C call).
+    pub fn db_filename(&self, db_name: &str) -> Result<Option<String>, Error> {
+        let db_c = CString::new(db_name)
+            .map_err(|e| standalone_error(ffi::SQLITE_MISUSE, e.to_string()))?;
+        // SAFETY: sqlite3_db_filename returns a pointer owned by
+        // SQLite (NUL-terminated, valid for the connection's life)
+        // or NULL if the named db is not attached. We do not free.
+        let p = unsafe { ffi::sqlite3_db_filename(self.raw, db_c.as_ptr()) };
+        if p.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: per the docs above; valid NUL-terminated string.
+        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        Ok(Some(s))
+    }
+
     /// `sqlite3_serialize` against this connection. Returns a
     /// copy of `db_name`'s contents (default schema is "main")
     /// as a Vec<u8>. Used by the cli's `.serialize` dot command
