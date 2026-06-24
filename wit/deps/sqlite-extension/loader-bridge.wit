@@ -65,4 +65,34 @@ interface loader-bridge {
     /// blake3-hex digest the host computed for a loaded
     /// extension. Returns the empty string for an unknown name.
     extension-digest: func(name: string) -> string;
+
+    /// One row in the host's loaded-extension registry, as
+    /// observable from inside a dotcmd-aware extension. The
+    /// `bundle-cli` extension snapshots this list at `.bundle
+    /// save` time to derive the bundle's set-hash.
+    record loaded-extension {
+        /// Extension name as the host registered it (matches what
+        /// `extension-digest` keys on).
+        name: string,
+        /// blake3-hex digest of the loaded extension's bytes; the
+        /// same value `extension-digest` returns.
+        digest: string,
+    }
+
+    /// Enumerate every extension currently registered in the host's
+    /// loaded-extension table. Returned in a stable order (name
+    /// ascending) so callers that hash the list can compare set
+    /// identity without sorting client-side. Used by `bundle-cli`'s
+    /// `.bundle save` to capture the live connection's extension
+    /// configuration  the canonical "snapshot from live connection"
+    /// move from PLAN-bundles.md.
+    list-loaded-extensions: func() -> list<loaded-extension>;
+
+    /// The host's current target triple (e.g. `aarch64-apple-darwin`,
+    /// `x86_64-unknown-linux-gnu`). Used by `bundle-cli`'s `.bundle
+    /// build` to (a) tell `spawn-build` which target to ask cargo
+    /// for and (b) record the same value in `bundle-binaries` so
+    /// the launch-flag lookup at exec time matches exactly. The
+    /// host computes this from `std::env::consts` (arch + os).
+    host-target-triple: func() -> string;
 }

@@ -776,6 +776,14 @@ interface build {
     /// values override the inherited environment, matching
     /// `std::process::Command::env`).
     ///
+    /// When `cargo-package` is `some(<name>)`, the host passes
+    /// `-p <name>` so cargo builds just that workspace member
+    /// rather than the default package. When `features` is
+    /// non-empty, the host passes `--features <comma-joined>`.
+    /// Both default to "off" so the prior single-crate call shape
+    /// keeps working unchanged. (Named `cargo-package` rather than
+    /// `package` because `package` is a reserved keyword in WIT.)
+    ///
     /// Returns `build-out` on success. Errors carry a
     /// non-zero SQLITE_* code and a message that includes the
     /// cargo exit status and the tail of stderr.
@@ -783,7 +791,130 @@ interface build {
         crate-root: string,
         target-triple: option<string>,
         env: list<tuple<string, string>>,
+        cargo-package: option<string>,
+        features: list<string>,
     ) -> result<build-out, sqlite-error>;
+}
+
+/// Bundle storage SPI. Read/write the host's cas-cache bundle
+/// registry. Substrate for PLAN-bundles.md (#446)  the `bundle-cli`
+/// extension calls these methods to record, look up, and prune
+/// named extension sets. The cas-cache lives at
+/// `~/.cache/sqlink/cas.sqlite`; it's host-managed and not
+/// reachable via `spi.execute` (which runs against the user's main
+/// connection), so this dedicated SPI exists.
+///
+/// Identity model: a `set-hash` is the SHA-256 (hex) of the sorted
+/// `(extension-name, content-hash)` tuples. Two bundles with the
+/// same members share the same `set-hash` and the same internal
+/// bundle row; multiple `name`s pointing at the same `set-hash`
+/// is allowed (alias semantics).
+///
+/// Capability gating: every method checks
+/// `manifest.declared-capabilities` for `capability::bundles`
+/// and returns `SQLITE_PERM` otherwise.
+interface bundles {
+    use types.{sqlite-error};
+
+    /// One member in a bundle  an (extension-name, content-hash)
+    /// pair. `content-hash` is the blake3-hex digest the host
+    /// already maintains in cas-cache for the extension bytes
+    /// (matches what `loader-bridge.extension-digest` returns).
+    record bundle-member {
+        extension-name: string,
+        content-hash: string,
+    }
+
+    /// Compact bundle row for `list` / `find-by-*`. Members
+    /// omitted; use `show` to fetch the full member list.
+    record bundle-summary {
+        id: u64,
+        name: option<string>,
+        set-hash: string,
+        created-at: u64,
+        last-used-at: u64,
+        member-count: u32,
+        binary-count: u32,
+    }
+
+    /// One baked binary row in `bundle-detail`.
+    record bundle-binary {
+        target-triple: string,
+        binary-path: string,
+        built-at: u64,
+    }
+
+    /// Full bundle row for `show`  members + binaries.
+    record bundle-detail {
+        summary: bundle-summary,
+        members: list<bundle-member>,
+        binaries: list<bundle-binary>,
+    }
+
+    /// GC policy. Exactly one of the two knobs should be set;
+    /// callers pass `none` for the unused field.
+    record gc-policy {
+        /// LRU eviction: keep at most this many bundles, drop the
+        /// rest in last-used-at ascending order. `none` means no
+        /// LRU cap.
+        keep-last: option<u32>,
+        /// Age eviction: drop bundles whose last-used-at is more
+        /// than this many seconds in the past. `none` means no
+        /// age cap.
+        older-than-secs: option<u64>,
+    }
+
+    /// Insert or alias a bundle. The host computes nothing  the
+    /// caller has already sorted+hashed `members` into `set-hash`.
+    /// Idempotent on `set-hash`: if a row already exists with the
+    /// same `set-hash`, this binds `name` as an alias to that row
+    /// (returning its id) instead of creating a duplicate. Errors
+    /// if `name` is already bound to a DIFFERENT `set-hash`.
+    bundle-save: func(
+        name: option<string>,
+        set-hash: string,
+        members: list<bundle-member>,
+    ) -> result<u64, sqlite-error>;
+
+    /// Exact-name lookup. Returns `none` if no bundle has that name.
+    bundle-find-by-name: func(name: string)
+        -> result<option<bundle-summary>, sqlite-error>;
+
+    /// Hash-prefix lookup. Returns all bundles whose `set-hash`
+    /// starts with `prefix`. Empty list = no matches; multiple
+    /// rows = ambiguous prefix (caller decides whether to error).
+    bundle-find-by-hash-prefix: func(prefix: string)
+        -> result<list<bundle-summary>, sqlite-error>;
+
+    /// Every bundle, ordered last-used-at descending.
+    bundle-list: func() -> result<list<bundle-summary>, sqlite-error>;
+
+    /// Full detail (members + binaries) for the bundle identified
+    /// by id. Errors if no such row.
+    bundle-show: func(id: u64) -> result<bundle-detail, sqlite-error>;
+
+    /// Drop the bundle row + its members + its binary rows.
+    /// Cas-cache artifact bytes are NOT touched  bundles are a
+    /// metadata layer above the cas-cache's content-addressed
+    /// storage. Errors if no such row.
+    bundle-delete: func(id: u64) -> result<_, sqlite-error>;
+
+    /// LRU / age-based prune. Returns the ids of dropped rows.
+    bundle-gc: func(policy: gc-policy) -> result<list<u64>, sqlite-error>;
+
+    /// Record a freshly-built binary against an existing bundle.
+    /// `target-triple` keys the row; re-recording the same triple
+    /// updates `binary-path` + `built-at`.
+    bundle-record-binary: func(
+        id: u64,
+        target-triple: string,
+        binary-path: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Update `last-used-at` for the bundle. Called by `bundle-cli`
+    /// on every `.bundle show` / launch-flag resolve so LRU GC
+    /// reflects actual use.
+    bundle-touch: func(id: u64);
 }
 
 /// `sqlite3_session_*` API surfaced as named handles. Per

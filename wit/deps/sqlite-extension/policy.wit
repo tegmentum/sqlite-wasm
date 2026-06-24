@@ -62,6 +62,14 @@ interface policy {
         /// at the WIT contract (the sqlite-lib stub returns a clear
         /// SQLITE_PERM-shaped error).
         spawn-build,
+        /// Bundle storage (sqlite:extension/bundles). Read/write
+        /// the host's cas-cache bundle registry: insert / find /
+        /// list / show / delete / gc / record-binary / touch.
+        /// Granting this lets the extension manage the bundle
+        /// metadata layer above cas-cache; pairs with `spawn-build`
+        /// for the `.bundle save NAME` (with-build) path.
+        /// PLAN-bundles.md (#446).
+        bundles,
     }
 
     /// Outbound HTTP policy. Applied by the host's `http::handle`

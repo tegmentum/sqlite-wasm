@@ -157,6 +157,11 @@ interface metadata {
         /// are responsible for translating that into a useful
         /// user-facing message.
         ///
+        /// Use for "extension is mostly useful without X, but unlocks
+        /// extra functionality when X is granted" cases (e.g.
+        /// bundle-cli: Bundles is required to load, SpawnBuild is
+        /// optional and only `.bundle build` needs it).
+        ///
         /// Default empty list. Items appearing in BOTH `declared-
         /// capabilities` and `optional-capabilities` are treated as
         /// declared (the strict gate wins).

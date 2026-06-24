@@ -67,6 +67,12 @@ interface library {
         /// the contract is still exported so worlds that import
         /// build link cleanly against sqlite-lib.
         spawn-build,
+        /// Bundle registry CRUD via `sqlite:extension/bundles`.
+        /// Substrate for the bundle-cli extension's metadata path.
+        /// Browser-side this is stubbed (no host cas-cache to back
+        /// it); a future browser deployment can implement IndexedDB-
+        /// backed bundles. v1 surface is native-only by design.
+        bundles,
     }
 
     /// Mirrors `sqlite:extension/policy.method`.

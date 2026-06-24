@@ -128,6 +128,12 @@ world sqlite-library {
     /// against sqlite-lib. The bundle-cli extension's baked-
     /// binary path requires native deployment by design.
     export sqlite:extension/build@0.1.0;
+    /// Bundle registry CRUD. Browser-side this is stubbed
+    /// (no host cas-cache reachable from the wasm sandbox);
+    /// the contract is exported so worlds that import bundles
+    /// link cleanly against sqlite-lib. A future browser
+    /// deployment can implement IndexedDB-backed bundles.
+    export sqlite:extension/bundles@0.1.0;
 
     export low-level;
     export high-level;

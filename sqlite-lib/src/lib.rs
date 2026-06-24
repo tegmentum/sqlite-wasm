@@ -559,6 +559,8 @@ impl BuildGuest for SqliteLib {
         _crate_root: String,
         _target_triple: Option<String>,
         _env: Vec<(String, String)>,
+        _cargo_package: Option<String>,
+        _features: Vec<String>,
     ) -> Result<BuildOut, SpiSqliteError> {
         Err(SpiSqliteError {
             code: 23, // SQLITE_PERM
@@ -568,6 +570,87 @@ impl BuildGuest for SqliteLib {
                  runtime (process spawn unavailable inside the wasm sandbox)"
                     .to_string(),
         })
+    }
+}
+
+// =========================================================================
+// sqlite:extension/bundles
+// =========================================================================
+//
+// Browser-side stub for the host-resident bundle registry SPI. The
+// cas-cache that backs bundles natively lives at
+// `~/.cache/sqlink/cas.sqlite` (host-managed). The wasm sandbox has
+// no access to that store; every method returns SQLITE_PERM with a
+// clear "not supported in the browser runtime" message. The contract
+// is still exported so worlds that import bundles link cleanly
+// against sqlite-lib  the bundle-cli extension's metadata path is
+// native-only by design (PLAN-bundles.md #446 v1; a future
+// browser-side variant could implement IndexedDB-backed bundles).
+use bindings::exports::sqlite::extension::bundles::{
+    BundleDetail, BundleMember, BundleSummary, GcPolicy,
+    Guest as BundlesGuest,
+};
+
+const BUNDLES_BROWSER_STUB: &str =
+    "bundles: not supported in sqlite-lib browser-composed runtime \
+     (no cas-cache reachable from the wasm sandbox; native deployment \
+     only in v1)";
+
+fn bundles_perm_err() -> SpiSqliteError {
+    SpiSqliteError {
+        code: 23, // SQLITE_PERM
+        extended_code: 23,
+        message: BUNDLES_BROWSER_STUB.to_string(),
+    }
+}
+
+impl BundlesGuest for SqliteLib {
+    fn bundle_save(
+        _name: Option<String>,
+        _set_hash: String,
+        _members: Vec<BundleMember>,
+    ) -> Result<u64, SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
+
+    fn bundle_find_by_name(
+        _name: String,
+    ) -> Result<Option<BundleSummary>, SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
+
+    fn bundle_find_by_hash_prefix(
+        _prefix: String,
+    ) -> Result<Vec<BundleSummary>, SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
+
+    fn bundle_list() -> Result<Vec<BundleSummary>, SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
+
+    fn bundle_show(_id: u64) -> Result<BundleDetail, SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
+
+    fn bundle_delete(_id: u64) -> Result<(), SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
+
+    fn bundle_gc(_policy: GcPolicy) -> Result<Vec<u64>, SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
+
+    fn bundle_record_binary(
+        _id: u64,
+        _target_triple: String,
+        _binary_path: String,
+    ) -> Result<(), SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
+
+    fn bundle_touch(_id: u64) {
+        // touch is fire-and-forget; nothing to record in the stub
     }
 }
 
@@ -1043,6 +1126,7 @@ mod lib_load {
             LibCap::WalFrames => pol::Capability::WalFrames,
             LibCap::S3 => pol::Capability::S3,
             LibCap::SpawnBuild => pol::Capability::SpawnBuild,
+            LibCap::Bundles => pol::Capability::Bundles,
         }
     }
 
@@ -1063,6 +1147,7 @@ mod lib_load {
             pol::Capability::WalFrames => LibCap::WalFrames,
             pol::Capability::S3 => LibCap::S3,
             pol::Capability::SpawnBuild => LibCap::SpawnBuild,
+            pol::Capability::Bundles => LibCap::Bundles,
         }
     }
 

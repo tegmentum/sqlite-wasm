@@ -3,16 +3,17 @@ package sqlite:extension@0.1.0;
 /// Minimal extension — read-only SQL + scalar functions. Suitable for
 /// stateless pure functions: text transforms, math, hashing.
 ///
-/// `wal-frames` + `s3-base` + `build` are imported into every world
-/// (not just `wal-aware` / `hookprobe` / `bundle-cli`) so the host's
-/// per-shape bindgen (`minimal`, `authorizing`, `hooked`,
-/// `tabular`, ...) consistently has the `wal_frames::Host` +
-/// `s3_base::Host` + `build::Host` traits to satisfy on
-/// `LoadedState`. Per-world `with:` clauses share one trait impl
-/// across every bindgen. The import surfaces are free for extensions
-/// that don't call them; the host's per-method capability gate
-/// (`capability::wal-frames`, `capability::s3`,
-/// `capability::spawn-build`) fails calls without the grant.
+/// `wal-frames` + `s3-base` + `build` + `bundles` are imported into
+/// every world (not just `wal-aware` / `hookprobe` / `bundle-cli`)
+/// so the host's per-shape bindgen (`minimal`, `authorizing`,
+/// `hooked`, `tabular`, ...) consistently has the
+/// `wal_frames::Host` + `s3_base::Host` + `build::Host` +
+/// `bundles::Host` traits to satisfy on `LoadedState`. Per-world
+/// `with:` clauses share one trait impl across every bindgen. The
+/// import surfaces are free for extensions that don't call them;
+/// the host's per-method capability gate (`capability::wal-frames`,
+/// `capability::s3`, `capability::spawn-build`,
+/// `capability::bundles`) fails calls without the grant.
 world minimal {
     import types;
     import spi;
@@ -22,6 +23,7 @@ world minimal {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -43,6 +45,7 @@ world minimal-http {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -66,6 +69,7 @@ world minimal-dns {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -84,6 +88,7 @@ world stateful {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -105,6 +110,7 @@ world lifecycle-aware {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export lifecycle;
@@ -127,6 +133,7 @@ world resolving {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -147,6 +154,7 @@ world collating {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -168,6 +176,7 @@ world authorizing {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -192,6 +201,7 @@ world hooked {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -217,6 +227,7 @@ world wal-aware {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -241,6 +252,7 @@ world hookprobe {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -263,6 +275,7 @@ world tabular {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -284,6 +297,7 @@ world tabular-mutating {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
 
     export metadata;
     export scalar-function;
@@ -310,6 +324,7 @@ world dotcmd-aware {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
     /// Phase 5 / follow-up: gives dot-command extensions a tight
     /// slice of the loader (just enough to register peer
     /// extensions). Used by `extensions/sqlink-meta-cli` to
@@ -345,6 +360,7 @@ world full {
     import wal-frames;
     import s3-base;
     import build;
+    import bundles;
     import cli-stdout;
     import cli-stderr;
     import cli-state;
