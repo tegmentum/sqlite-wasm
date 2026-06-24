@@ -127,6 +127,21 @@ interface metadata {
         has-update-hook: bool,
         /// True if the extension also exports a `commit-hook` interface.
         has-commit-hook: bool,
+        /// True if the extension also exports a `wal-hook` interface.
+        /// When set, the host's spi-loader registers
+        /// `wal-hook.on-wal-hook` against the shared connection and
+        /// routes WAL-commit callbacks back through it. The
+        /// substrate installs at most one wal-hook callback on the
+        /// connection (SQLite's per-connection slot); v1 semantics
+        /// are last-write-wins across loaded extensions.
+        has-wal-hook: bool,
+        /// Identifier the host echoes back to `wal-hook.on-wal-hook`
+        /// when `has-wal-hook` is true. The host has no opinion on
+        /// the value; the extension chooses whatever it wants to
+        /// receive (lets one extension multiplex multiple wal-hook
+        /// implementations behind a single export). Ignored when
+        /// `has-wal-hook` is false.
+        wal-hook-id: u64,
         /// REQUIRED: every host capability the extension imports MUST be
         /// listed here. The loader compares this against
         /// `load-options.grant` and refuses to load if any item is
@@ -246,6 +261,33 @@ interface commit-hook {
 
     /// Called after rollback completes.
     on-rollback: func();
+}
+
+/// Write-ahead-log hook. Active only if `manifest.has-wal-hook` is
+/// true. SQLite fires this after a WAL commit has appended
+/// `n-frames-in-wal` frames to the WAL for database `db-name`.
+///
+/// Return zero (SQLITE_OK) for normal continuation, or a non-zero
+/// SQLite result code to propagate the error to the calling SQL
+/// statement. Common use cases (the wal-archive extension being
+/// the canonical example) only ever return SQLITE_OK from here;
+/// non-zero codes are reserved for failure paths like
+/// "checkpoint required but couldn't acquire writer lock".
+///
+/// `hook-id` is the extension-chosen identifier the host echoes
+/// back so the extension can multiplex internally if it has more
+/// than one wal-hook implementation. v1 manifest declares the
+/// feature as a single bool (`has-wal-hook`); the extension picks
+/// the id it wants the host to pass (any non-zero u64 is fine).
+/// The substrate only ever installs one wal-hook callback at a
+/// time on the connection (SQLite allows a single wal-hook per
+/// connection).
+interface wal-hook {
+    on-wal-hook: func(
+        hook-id: u64,
+        db-name: string,
+        n-frames-in-wal: u32,
+    ) -> s32;
 }
 
 /// Virtual-table dispatch. The host calls every method with the
