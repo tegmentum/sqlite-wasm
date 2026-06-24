@@ -125,6 +125,54 @@ interface spi {
     open-db: func(path: string) -> result<_, sqlite-error>;
 }
 
+/// Raw WAL frame access for extensions that ship the WAL bytes
+/// off-box (the canonical consumer is `wal-archive`). Distinct
+/// from `spi` so capability gating can grant WAL access without
+/// also granting the full SQL surface  and vice versa.
+///
+/// Native impl: reads the on-disk `<db_path>-wal` sidecar file
+/// directly. Browser impl: stubbed until vfs-tvm grows WAL
+/// support (#437); `get-wal-header` returns `None` and
+/// `read-frames` errors.
+///
+/// Substrate for PLAN-wal-archive-extension.md (#439).
+interface wal-frames {
+    use types.{sqlite-error};
+
+    /// 32-byte WAL file header (the SQLite WAL format header,
+    /// not the per-frame header). `None` when journal_mode  wal
+    /// or the WAL file doesn't exist yet. Extensions parse
+    /// `page_size` from this header (offset 8, big-endian u32)
+    /// before calling `read-frames`.
+    get-wal-header: func(db-name: string)
+        -> result<option<list<u8>>, sqlite-error>;
+
+    /// `n-frames` frames starting at `start-frame` (1-based per
+    /// SQLite's WAL format). Each frame is `24 + page_size` bytes.
+    /// The caller MUST derive `page_size` from `get-wal-header`
+    /// first; the host won't second-guess the requested range.
+    /// Errors on out-of-bounds reads.
+    read-frames: func(db-name: string, start-frame: u32, n-frames: u32)
+        -> result<list<u8>, sqlite-error>;
+}
+
+/// Database snapshot surface. Distinct from `spi` (which also
+/// exposes `serialize-db` for `.serialize`) so capability gating
+/// can grant snapshot-only access to backup-oriented extensions
+/// without forcing them through the full spi surface.
+///
+/// Substrate for PLAN-wal-archive-extension.md (#439).
+interface backup {
+    use types.{sqlite-error};
+
+    /// One-shot serialize. Briefly holds the write lock during
+    /// `sqlite3_serialize()`  fine for the wal-archive snapshot
+    /// cadence (default 24h). Allocates the full db in host
+    /// memory. Incremental `sqlite3_backup_*` + streaming variants
+    /// are v2.
+    serialize-db: func(db-name: string) -> result<list<u8>, sqlite-error>;
+}
+
 /// Loader / host-specific extensions to `spi`. Distinct interface
 /// because these methods are about hosting OTHER extensions (the
 /// register-* trampolines + cli-mode toggles), not about querying
@@ -222,6 +270,20 @@ interface spi-loader {
     /// Install the loaded extension as the active commit + rollback
     /// hook pair. Stage 5e.10.
     register-commit-hook: func(ext-name: string) -> result<_, sqlite-error>;
+
+    /// Install the loaded extension's `wal-hook.on-wal-hook` callback
+    /// (selected by `hook-id`) as the active WAL hook on the host's
+    /// shared connection. SQLite fires the wal-hook after each WAL
+    /// commit; the host's trampoline re-enters the extension via the
+    /// imported `dispatch.wal-hook` with the matching `hook-id`.
+    ///
+    /// SQLite allows only one wal-hook per connection; v1 semantics
+    /// are last-write-wins. Cleared by `unregister-extension(ext-name)`.
+    /// Substrate primitive used by the wal-archive extension.
+    register-wal-hook: func(
+        ext-name: string,
+        hook-id: u64,
+    ) -> result<_, sqlite-error>;
 
     /// Register a virtual-table module on the host's shared
     /// connection. The host installs a native sqlite3_module whose

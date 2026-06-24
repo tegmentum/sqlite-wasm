@@ -142,6 +142,12 @@ world authorizing {
 /// Extension that observes row-level changes and transaction
 /// boundaries. scalar-function exported for the same reason as in
 /// `authorizing` — uniform metadata bootstrap shape.
+///
+/// Also exports `wal-hook` so extensions that only need the WAL
+/// substrate (the wal-archive extension being the canonical
+/// example) can pick this same world; the host's substrate routes
+/// dispatch by the manifest's `has-*-hook` flags so unused
+/// exports cost nothing.
 world hooked {
     import types;
     import spi;
@@ -153,6 +159,70 @@ world hooked {
     export scalar-function;
     export update-hook;
     export commit-hook;
+    export wal-hook;
+}
+
+/// Hook-aware extension that ALSO needs raw WAL-frame access and
+/// snapshot-serialize  the canonical shape of the wal-archive
+/// extension (and the test-bench `hookprobe`-style probes that
+/// exercise the same substrate). Builds on `hooked` by adding the
+/// two capability-gated SPI imports introduced in PLAN-wal-archive
+/// substrate #439.
+world wal-aware {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+    import wal-frames;
+    import backup;
+
+    export metadata;
+    export scalar-function;
+    export update-hook;
+    export commit-hook;
+    export wal-hook;
+}
+
+/// `minimal` + the `backup` import. For extensions that only need
+/// to take a snapshot of the live database (e.g. an export-to-zip
+/// or upload-to-object-store probe) without subscribing to hooks
+/// or asking for raw WAL frames. Capability-gated separately from
+/// `wal-frames`.
+world backup-aware {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+    import backup;
+
+    export metadata;
+    export scalar-function;
+}
+
+/// Test-bench world that wires every hook surface in one
+/// component: authorizer + update-hook + commit-hook (the latter
+/// also covers rollback per `commit-hook`'s WIT contract) +
+/// wal-hook. Used by extensions like `hookprobe` that exercise
+/// the dispatch-bridge hook trampolines from end-to-end browser
+/// tests. Not intended for production extensions  pick `hooked`
+/// or `authorizing` if you only need one of the three slots.
+world hookprobe {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+    import wal-frames;
+    import backup;
+
+    export metadata;
+    export scalar-function;
+    export authorizer;
+    export update-hook;
+    export commit-hook;
+    export wal-hook;
 }
 
 /// Extension that exposes one or more virtual-table modules
@@ -238,6 +308,8 @@ world full {
     import encoding;
     import http;
     import dns;
+    import wal-frames;
+    import backup;
     import cli-stdout;
     import cli-stderr;
     import cli-state;
