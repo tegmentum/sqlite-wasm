@@ -39,6 +39,11 @@ interface policy {
         http,
         /// Outbound DNS resolution (sqlite:extension/dns).
         dns,
+        /// Raw WAL frame access (sqlite:extension/wal-frames).
+        /// Substrate for the wal-archive extension; gated separately
+        /// from `spi` so an extension can read WAL bytes without also
+        /// holding the full SQL surface (and vice versa).
+        wal-frames,
     }
 
     /// Outbound HTTP policy. Applied by the host's `http::handle`

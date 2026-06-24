@@ -156,23 +156,6 @@ interface wal-frames {
         -> result<list<u8>, sqlite-error>;
 }
 
-/// Database snapshot surface. Distinct from `spi` (which also
-/// exposes `serialize-db` for `.serialize`) so capability gating
-/// can grant snapshot-only access to backup-oriented extensions
-/// without forcing them through the full spi surface.
-///
-/// Substrate for PLAN-wal-archive-extension.md (#439).
-interface backup {
-    use types.{sqlite-error};
-
-    /// One-shot serialize. Briefly holds the write lock during
-    /// `sqlite3_serialize()`  fine for the wal-archive snapshot
-    /// cadence (default 24h). Allocates the full db in host
-    /// memory. Incremental `sqlite3_backup_*` + streaming variants
-    /// are v2.
-    serialize-db: func(db-name: string) -> result<list<u8>, sqlite-error>;
-}
-
 /// Loader / host-specific extensions to `spi`. Distinct interface
 /// because these methods are about hosting OTHER extensions (the
 /// register-* trampolines + cli-mode toggles), not about querying

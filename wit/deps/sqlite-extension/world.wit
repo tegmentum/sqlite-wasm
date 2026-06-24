@@ -2,12 +2,21 @@ package sqlite:extension@0.1.0;
 
 /// Minimal extension — read-only SQL + scalar functions. Suitable for
 /// stateless pure functions: text transforms, math, hashing.
+///
+/// `wal-frames` is imported into the base world so the host's loaded
+/// bindgen has a single `wal_frames::Host` trait to implement on
+/// `LoadedState`; per-world reuse via `with:` then folds the same
+/// dispatcher into every widened world without duplicating impls.
+/// Extensions that do not declare `capability::wal-frames` simply
+/// never call the imports; the host's per-method capability gate
+/// fails fast otherwise.
 world minimal {
     import types;
     import spi;
     import session;
     import logging;
     import config;
+    import wal-frames;
 
     export metadata;
     export scalar-function;
@@ -162,12 +171,14 @@ world hooked {
     export wal-hook;
 }
 
-/// Hook-aware extension that ALSO needs raw WAL-frame access and
-/// snapshot-serialize  the canonical shape of the wal-archive
-/// extension (and the test-bench `hookprobe`-style probes that
-/// exercise the same substrate). Builds on `hooked` by adding the
-/// two capability-gated SPI imports introduced in PLAN-wal-archive
-/// substrate #439.
+/// Hook-aware extension that ALSO needs raw WAL-frame access  the
+/// canonical shape of the wal-archive extension (and the test-bench
+/// `hookprobe`-style probes that exercise the same substrate).
+/// Builds on `hooked` by adding the capability-gated WAL-frames SPI
+/// import introduced in PLAN-wal-archive substrate #439.
+///
+/// Snapshot-serialize is available via the existing `spi.serialize-db`
+/// (gated by `capability::spi`); no separate `backup` interface.
 world wal-aware {
     import types;
     import spi;
@@ -175,30 +186,12 @@ world wal-aware {
     import logging;
     import config;
     import wal-frames;
-    import backup;
 
     export metadata;
     export scalar-function;
     export update-hook;
     export commit-hook;
     export wal-hook;
-}
-
-/// `minimal` + the `backup` import. For extensions that only need
-/// to take a snapshot of the live database (e.g. an export-to-zip
-/// or upload-to-object-store probe) without subscribing to hooks
-/// or asking for raw WAL frames. Capability-gated separately from
-/// `wal-frames`.
-world backup-aware {
-    import types;
-    import spi;
-    import session;
-    import logging;
-    import config;
-    import backup;
-
-    export metadata;
-    export scalar-function;
 }
 
 /// Test-bench world that wires every hook surface in one
@@ -215,7 +208,6 @@ world hookprobe {
     import logging;
     import config;
     import wal-frames;
-    import backup;
 
     export metadata;
     export scalar-function;
@@ -309,7 +301,6 @@ world full {
     import http;
     import dns;
     import wal-frames;
-    import backup;
     import cli-stdout;
     import cli-stderr;
     import cli-state;
