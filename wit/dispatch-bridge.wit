@@ -170,10 +170,49 @@ interface dispatch-bridge {
         hook-id: u64,
     ) -> result<_, sqlite-error>;
 
+    /// Install a virtual-table module trampoline on sqlite-lib's
+    /// internal connection routed to `ext-name` + `vtab-id`. SQLite
+    /// invokes the per-module xCreate/xConnect/xBestIndex/xOpen/
+    /// xClose/xFilter/xNext/xEof/xColumn/xRowid/xDisconnect/xDestroy
+    /// callbacks the trampoline installs via
+    /// `sqlite3_create_module_v2(name, &module, aux, destructor)`.
+    /// Each callback re-enters the host via the matching
+    /// `dispatch.vtab-*` import, threading
+    /// `(ext-name, vtab-id, instance-id, cursor-id)` through so the
+    /// host can route the call back to the loaded extension's `vtab`
+    /// (and, when `mutable`, `vtab-update`) exports.
+    ///
+    /// - `eponymous = true`  install with xCreate = NULL so the
+    ///   module name itself is usable as a TVF (no
+    ///   `CREATE VIRTUAL TABLE` required).
+    /// - `mutable = true`  pick the iVersion-2 module template that
+    ///   also wires xUpdate / xBegin / xSync / xCommit / xRollback /
+    ///   xRename / xSavepoint / xRelease / xRollbackTo to the
+    ///   `dispatch.vtab-*` mutating imports.
+    /// - `batched = true`  the trampoline calls
+    ///   `dispatch.vtab-fetch-batch` once per block instead of
+    ///   per-row `vtab-column` / `vtab-rowid` / `vtab-next`, serving
+    ///   xColumn / xRowid / xNext from a wasm-side row cache.
+    ///
+    /// Signature mirrors `spi-loader.register-vtab` exactly. Cleared
+    /// by `unregister-extension(ext-name)`: every module registered
+    /// under that ext-name is dropped by re-registering a null
+    /// module under the same name (SQLite has no first-class remove
+    /// module API).
+    register-host-vtab: func(
+        ext-name: string,
+        name: string,
+        vtab-id: u64,
+        eponymous: bool,
+        mutable: bool,
+        batched: bool,
+    ) -> result<_, sqlite-error>;
+
     /// Drop every host registration (scalar, aggregate, collation,
-    /// authorizer, update/commit/rollback hook) belonging to
-    /// `ext-name`. Mirrors `spi-loader.unregister-extension` on
-    /// the wasm side. Idempotent: unregistering an extension with
-    /// no registrations is a no-op.
+    /// authorizer, update/commit/rollback hook, vtab module)
+    /// belonging to `ext-name`. Mirrors
+    /// `spi-loader.unregister-extension` on the wasm side.
+    /// Idempotent: unregistering an extension with no registrations
+    /// is a no-op.
     unregister-extension: func(ext-name: string);
 }
