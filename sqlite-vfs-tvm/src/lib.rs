@@ -136,6 +136,75 @@ struct TvmFileInner {
     /// `io_close` so the auxiliary's close doesn't try to walk
     /// the FILES table looking for further children.
     is_auxiliary: bool,
+    /// Current SQLite lock level for this open file. Tracks the
+    /// state SQLite expects across `xLock` / `xUnlock` calls
+    /// (`SQLITE_LOCK_NONE` through `SQLITE_LOCK_EXCLUSIVE`).
+    ///
+    /// We're single-process / single-threaded inside the wasm
+    /// guest so contention is impossible — but SQLite still
+    /// asserts consistent transitions (e.g. SHARED before
+    /// RESERVED, RESERVED before EXCLUSIVE), and WAL mode in
+    /// particular probes the level via `xCheckReservedLock` +
+    /// `SQLITE_FCNTL_LOCKSTATE`. Track it locally so those
+    /// probes report something coherent.
+    lock_level: c_int,
+    /// Shared-memory state for `-shm` opens, allocated lazily on
+    /// the first `xShmMap` call. None for non-shm files. SQLite
+    /// uses this for the WAL index; see the `ShmState` struct
+    /// below for the per-file region + lock bookkeeping.
+    shm: Option<Box<ShmState>>,
+}
+
+/// Per-file shared-memory state used by SQLite's WAL index.
+///
+/// SQLite's WAL implementation maps the `-shm` file in fixed-size
+/// regions (32 KiB by default) and uses 8 lock slots
+/// (`SQLITE_SHM_NLOCK`) for coordination. Single-process means
+/// the lock counts are bookkeeping only — there is nothing to
+/// contend with — but SQLite asserts consistent transitions, so
+/// we track them.
+///
+/// Lifetimes: each `Box<[u8]>` region is owned by the file's
+/// `ShmState`; the pointer we hand back via `xShmMap` is valid
+/// for the lifetime of that owning Box. SQLite documents that
+/// region pointers stay live until the matching `xShmUnmap`, and
+/// `xShmUnmap` runs only at file close, so a file's
+/// `ShmState.regions` Vec must not be reallocated in-place across
+/// xShmMap calls. Since `Box<[u8]>` is heap-allocated and the
+/// inner bytes don't move when the Vec grows, this contract is
+/// satisfied.
+struct ShmState {
+    /// Region index → owned byte buffer. Sparse: entries may be
+    /// `None` if SQLite asked about a region without extending
+    /// it. Region size is the `pgsz` SQLite passes on the first
+    /// successful `xShmMap` for that region (uniform per file).
+    regions: Vec<Option<Box<[u8]>>>,
+    /// Per-slot lock state. Single-process makes contention
+    /// impossible; we still track for SQLite's transition
+    /// assertions.
+    locks: [ShmLockState; 8],
+}
+
+/// State of one of SQLite's 8 shm-lock slots.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum ShmLockState {
+    /// No lock held.
+    Unlocked,
+    /// Shared lock held by `count` openers. Single-process is
+    /// always 1 in practice; the field exists to satisfy any
+    /// future code that nests shared locks.
+    Shared(u32),
+    /// Exclusive lock held.
+    Exclusive,
+}
+
+impl ShmState {
+    fn new() -> Self {
+        Self {
+            regions: Vec::new(),
+            locks: [ShmLockState::Unlocked; 8],
+        }
+    }
 }
 
 /// `#[repr(C)]` so the `base` field is at offset 0 — SQLite
@@ -253,12 +322,35 @@ unsafe extern "C" fn io_file_size(
     ffi::SQLITE_OK
 }
 
-unsafe extern "C" fn io_lock(_file: *mut sqlite3_file, _level: c_int) -> c_int {
-    // Single-process; locking is moot.
+unsafe extern "C" fn io_lock(file: *mut sqlite3_file, level: c_int) -> c_int {
+    // Single-process / single-threaded inside the wasm guest, so
+    // no other connection can be holding a competing lock.
+    // SQLite still asserts consistent transitions — `xLock` is
+    // documented as monotonic (it never decreases the level), and
+    // WAL probes the level via SQLITE_FCNTL_LOCKSTATE — so track
+    // the value per-file.
+    let tf = file as *mut TvmFile;
+    if tf.is_null() || (*tf).inner.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    let inner = &mut *(*tf).inner;
+    if level > inner.lock_level {
+        inner.lock_level = level;
+    }
     ffi::SQLITE_OK
 }
 
-unsafe extern "C" fn io_unlock(_file: *mut sqlite3_file, _level: c_int) -> c_int {
+unsafe extern "C" fn io_unlock(file: *mut sqlite3_file, level: c_int) -> c_int {
+    // Monotonic in the other direction: xUnlock never increases
+    // the level. Drop to the requested level.
+    let tf = file as *mut TvmFile;
+    if tf.is_null() || (*tf).inner.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    let inner = &mut *(*tf).inner;
+    if level < inner.lock_level {
+        inner.lock_level = level;
+    }
     ffi::SQLITE_OK
 }
 
@@ -266,6 +358,10 @@ unsafe extern "C" fn io_check_reserved_lock(
     _file: *mut sqlite3_file,
     p_res_out: *mut c_int,
 ) -> c_int {
+    // Single-process — nobody else can possibly hold RESERVED on
+    // this file, so always report 0. SQLite uses this to decide
+    // whether to escalate from SHARED to EXCLUSIVE during a
+    // commit; 0 says "go ahead."
     if !p_res_out.is_null() {
         *p_res_out = 0;
     }
@@ -273,12 +369,22 @@ unsafe extern "C" fn io_check_reserved_lock(
 }
 
 unsafe extern "C" fn io_file_control(
-    _file: *mut sqlite3_file,
-    _op: c_int,
-    _arg: *mut c_void,
+    file: *mut sqlite3_file,
+    op: c_int,
+    arg: *mut c_void,
 ) -> c_int {
-    // SQLite uses xFileControl to ask for VFS-specific extensions
-    // (pragmas, file-control commands). We don't expose any.
+    // Honor SQLITE_FCNTL_LOCKSTATE so callers (including SQLite's
+    // own diagnostic paths) can read the current lock level. Any
+    // other file-control is unsupported on this VFS.
+    if op == ffi::SQLITE_FCNTL_LOCKSTATE {
+        let tf = file as *mut TvmFile;
+        if tf.is_null() || (*tf).inner.is_null() || arg.is_null() {
+            return ffi::SQLITE_IOERR;
+        }
+        let inner = &*(*tf).inner;
+        *(arg as *mut c_int) = inner.lock_level;
+        return ffi::SQLITE_OK;
+    }
     ffi::SQLITE_NOTFOUND
 }
 
@@ -408,6 +514,8 @@ unsafe extern "C" fn vfs_open(
         name,
         delete_on_close,
         is_auxiliary,
+        lock_level: ffi::SQLITE_LOCK_NONE,
+        shm: None,
     }));
 
     // Initialize the sqlite3_file slab. SAFETY: SQLite passes us
