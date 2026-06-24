@@ -55,6 +55,9 @@ interface library {
         encoding,
         http,
         dns,
+        /// Raw WAL frame access via `sqlite:extension/wal-frames`.
+        /// Substrate for the wal-archive extension.
+        wal-frames,
     }
 
     /// Mirrors `sqlite:extension/policy.method`.

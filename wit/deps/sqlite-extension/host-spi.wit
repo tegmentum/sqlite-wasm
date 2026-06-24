@@ -125,6 +125,37 @@ interface spi {
     open-db: func(path: string) -> result<_, sqlite-error>;
 }
 
+/// Raw WAL frame access for extensions that ship the WAL bytes
+/// off-box (the canonical consumer is `wal-archive`). Distinct
+/// from `spi` so capability gating can grant WAL access without
+/// also granting the full SQL surface  and vice versa.
+///
+/// Native impl: reads the on-disk `<db_path>-wal` sidecar file
+/// directly. Browser impl: stubbed until vfs-tvm grows WAL
+/// support (#437); `get-wal-header` returns `None` and
+/// `read-frames` errors.
+///
+/// Substrate for PLAN-wal-archive-extension.md (#439).
+interface wal-frames {
+    use types.{sqlite-error};
+
+    /// 32-byte WAL file header (the SQLite WAL format header,
+    /// not the per-frame header). `None` when journal_mode  wal
+    /// or the WAL file doesn't exist yet. Extensions parse
+    /// `page_size` from this header (offset 8, big-endian u32)
+    /// before calling `read-frames`.
+    get-wal-header: func(db-name: string)
+        -> result<option<list<u8>>, sqlite-error>;
+
+    /// `n-frames` frames starting at `start-frame` (1-based per
+    /// SQLite's WAL format). Each frame is `24 + page_size` bytes.
+    /// The caller MUST derive `page_size` from `get-wal-header`
+    /// first; the host won't second-guess the requested range.
+    /// Errors on out-of-bounds reads.
+    read-frames: func(db-name: string, start-frame: u32, n-frames: u32)
+        -> result<list<u8>, sqlite-error>;
+}
+
 /// Loader / host-specific extensions to `spi`. Distinct interface
 /// because these methods are about hosting OTHER extensions (the
 /// register-* trampolines + cli-mode toggles), not about querying

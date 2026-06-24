@@ -110,6 +110,12 @@ world sqlite-library {
     export sqlite:extension/spi@0.1.0;
     export sqlite:extension/logging@0.1.0;
     export sqlite:extension/config@0.1.0;
+    /// Raw WAL-frame access. Browser-side this returns the
+    /// documented no-WAL sentinels until vfs-tvm grows WAL
+    /// support (#437); the contract stays honored so widened
+    /// worlds that import wal-frames can compose against
+    /// sqlite-lib without panicking.
+    export sqlite:extension/wal-frames@0.1.0;
 
     export low-level;
     export high-level;

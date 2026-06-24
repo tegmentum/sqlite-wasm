@@ -127,6 +127,21 @@ interface metadata {
         has-update-hook: bool,
         /// True if the extension also exports a `commit-hook` interface.
         has-commit-hook: bool,
+        /// True if the extension also exports a `wal-hook` interface.
+        /// When set, the host's spi-loader registers
+        /// `wal-hook.on-wal-hook` against the shared connection and
+        /// routes WAL-commit callbacks back through it. The
+        /// substrate installs at most one wal-hook callback on the
+        /// connection (SQLite's per-connection slot); v1 semantics
+        /// are last-write-wins across loaded extensions.
+        has-wal-hook: bool,
+        /// Identifier the host echoes back to `wal-hook.on-wal-hook`
+        /// when `has-wal-hook` is true. The host has no opinion on
+        /// the value; the extension chooses whatever it wants to
+        /// receive (lets one extension multiplex multiple wal-hook
+        /// implementations behind a single export). Ignored when
+        /// `has-wal-hook` is false.
+        wal-hook-id: u64,
         /// REQUIRED: every host capability the extension imports MUST be
         /// listed here. The loader compares this against
         /// `load-options.grant` and refuses to load if any item is
@@ -259,12 +274,14 @@ interface commit-hook {
 /// non-zero codes are reserved for failure paths like
 /// "checkpoint required but couldn't acquire writer lock".
 ///
-/// `hook-id` is the manifest-assigned identifier the host uses to
-/// route the call back into the extension. The extension may
-/// declare multiple wal-hook ids in its manifest's
-/// `wal-hooks` list and dispatch in `wal-hook` on the id; the
-/// substrate only ever installs one of them at a time on the
-/// connection (SQLite allows a single wal-hook per connection).
+/// `hook-id` is the extension-chosen identifier the host echoes
+/// back so the extension can multiplex internally if it has more
+/// than one wal-hook implementation. v1 manifest declares the
+/// feature as a single bool (`has-wal-hook`); the extension picks
+/// the id it wants the host to pass (any non-zero u64 is fine).
+/// The substrate only ever installs one wal-hook callback at a
+/// time on the connection (SQLite allows a single wal-hook per
+/// connection).
 interface wal-hook {
     on-wal-hook: func(
         hook-id: u64,
