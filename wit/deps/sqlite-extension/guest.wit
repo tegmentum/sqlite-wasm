@@ -149,6 +149,18 @@ interface metadata {
         /// capabilities used (extension is pure / only uses its own
         /// allocator).
         declared-capabilities: list<capability>,
+        /// OPTIONAL: capabilities the extension *may* use if granted,
+        /// but does not require to load. The loader does NOT enforce
+        /// `optional  granted`. If a runtime call into an
+        /// optional-capability SPI is made without the grant in place,
+        /// the host returns SQLITE_PERM at the call site; extensions
+        /// are responsible for translating that into a useful
+        /// user-facing message.
+        ///
+        /// Default empty list. Items appearing in BOTH `declared-
+        /// capabilities` and `optional-capabilities` are treated as
+        /// declared (the strict gate wins).
+        optional-capabilities: list<capability>,
     }
 
     /// Return the extension's full manifest. Called once by the host

@@ -158,6 +158,10 @@ interface library {
         has-update-hook: bool,
         has-commit-hook: bool,
         declared-capabilities: list<capability>,
+        /// Mirrors `sqlite:extension/metadata.manifest.optional-
+        /// capabilities`. Capabilities the extension may use if
+        /// granted but doesn't require to load.
+        optional-capabilities: list<capability>,
     }
 
     /// Programmatic `.load`. Forwards to the host's

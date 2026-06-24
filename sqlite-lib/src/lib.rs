@@ -1145,6 +1145,7 @@ mod lib_load {
             has_update_hook: m.has_update_hook,
             has_commit_hook: m.has_commit_hook,
             declared_capabilities: m.declared_capabilities.into_iter().map(cap_to_lib).collect(),
+            optional_capabilities: m.optional_capabilities.into_iter().map(cap_to_lib).collect(),
         }
     }
 
