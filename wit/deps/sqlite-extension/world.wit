@@ -3,13 +3,14 @@ package sqlite:extension@0.1.0;
 /// Minimal extension — read-only SQL + scalar functions. Suitable for
 /// stateless pure functions: text transforms, math, hashing.
 ///
-/// `wal-frames` is imported into the base world so the host's loaded
-/// bindgen has a single `wal_frames::Host` trait to implement on
-/// `LoadedState`; per-world reuse via `with:` then folds the same
-/// dispatcher into every widened world without duplicating impls.
-/// Extensions that do not declare `capability::wal-frames` simply
-/// never call the imports; the host's per-method capability gate
-/// fails fast otherwise.
+/// `wal-frames` is imported into every world (not just `wal-aware` /
+/// `hookprobe`) so the host's per-shape bindgen (`minimal`,
+/// `authorizing`, `hooked`, `tabular`, ...) consistently has the
+/// `wal_frames::Host` trait to satisfy on `LoadedState`. Per-world
+/// `with:` clauses share one trait impl across every bindgen. The
+/// import surface is free for extensions that don't call it; the
+/// host's per-method capability gate (`capability::wal-frames`)
+/// fails calls without the grant.
 world minimal {
     import types;
     import spi;
@@ -35,6 +36,7 @@ world minimal-http {
     import logging;
     import config;
     import http;
+    import wal-frames;
 
     export metadata;
     export scalar-function;
@@ -55,6 +57,7 @@ world minimal-dns {
     // resolvable even when this world doesn't directly use it.
     import http;
     import dns;
+    import wal-frames;
 
     export metadata;
     export scalar-function;
@@ -70,6 +73,7 @@ world stateful {
     import config;
     import state;
     import cache;
+    import wal-frames;
 
     export metadata;
     export scalar-function;
@@ -88,6 +92,7 @@ world lifecycle-aware {
     import config;
     import state;
     import cache;
+    import wal-frames;
 
     export metadata;
     export lifecycle;
@@ -107,6 +112,7 @@ world resolving {
     import logging;
     import config;
     import http;
+    import wal-frames;
 
     export metadata;
     export scalar-function;
@@ -124,6 +130,7 @@ world collating {
     import session;
     import logging;
     import config;
+    import wal-frames;
 
     export metadata;
     export scalar-function;
@@ -142,6 +149,7 @@ world authorizing {
     import session;
     import logging;
     import config;
+    import wal-frames;
 
     export metadata;
     export scalar-function;
@@ -163,6 +171,7 @@ world hooked {
     import session;
     import logging;
     import config;
+    import wal-frames;
 
     export metadata;
     export scalar-function;
@@ -227,6 +236,7 @@ world tabular {
     import session;
     import logging;
     import config;
+    import wal-frames;
 
     export metadata;
     export scalar-function;
@@ -245,6 +255,7 @@ world tabular-mutating {
     import session;
     import logging;
     import config;
+    import wal-frames;
 
     export metadata;
     export scalar-function;
@@ -268,6 +279,7 @@ world dotcmd-aware {
     import cli-stdout;
     import cli-stderr;
     import cli-state;
+    import wal-frames;
     /// Phase 5 / follow-up: gives dot-command extensions a tight
     /// slice of the loader (just enough to register peer
     /// extensions). Used by `extensions/sqlink-meta-cli` to
