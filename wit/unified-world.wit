@@ -122,6 +122,12 @@ world sqlite-library {
     /// #437  the wal-archive extension's primary off-box sink
     /// requires native deployment for v1.
     export sqlite:extension/s3-base@0.1.0;
+    /// Host-resident cargo build. Browser-side this is stubbed
+    /// (wasm sandboxes can't spawn cargo); the contract is
+    /// exported so worlds that import build link cleanly
+    /// against sqlite-lib. The bundle-cli extension's baked-
+    /// binary path requires native deployment by design.
+    export sqlite:extension/build@0.1.0;
 
     export low-level;
     export high-level;

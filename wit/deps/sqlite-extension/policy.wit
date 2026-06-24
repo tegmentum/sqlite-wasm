@@ -53,6 +53,15 @@ interface policy {
         /// extension itself decides which bucket / region to hit. The
         /// operator's grant is purely an allow-the-surface bit.
         s3,
+        /// Host-resident cargo build (sqlite:extension/build).
+        /// Substrate for the `bundle-cli` extension's baked-binary
+        /// path (PLAN-bundles.md). Granting this lets the extension
+        /// spawn `cargo build` against a generated crate root;
+        /// no rich policy fields  the operator's grant is purely
+        /// an allow-the-surface bit. Browser deployments fail-closed
+        /// at the WIT contract (the sqlite-lib stub returns a clear
+        /// SQLITE_PERM-shaped error).
+        spawn-build,
     }
 
     /// Outbound HTTP policy. Applied by the host's `http::handle`

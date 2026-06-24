@@ -474,6 +474,9 @@ use bindings::exports::sqlite::extension::s3_base::{
     S3GetObjectOutput, S3HeadObjectOutput, S3ListObjectsOptions, S3ListObjectsOutput,
     S3PutObjectOptions, S3PutObjectOutput,
 };
+use bindings::exports::sqlite::extension::build::{
+    BuildOut, Guest as BuildGuest,
+};
 
 const S3_BROWSER_STUB: &str =
     "s3-base: not implemented in sqlite-lib browser-composed runtime \
@@ -537,6 +540,34 @@ impl S3BaseGuest for SqliteLib {
         _dest_key: String,
     ) -> Result<S3PutObjectOutput, S3Error> {
         Err(S3Error::Internal(S3_BROWSER_STUB.to_string()))
+    }
+}
+
+// =========================================================================
+// sqlite:extension/build
+// =========================================================================
+//
+// Browser-side stub for the host-resident build SPI. Wasm
+// sandboxes can't spawn cargo, so this returns SQLITE_PERM with
+// a clear "not supported in the browser runtime" message. The
+// contract is exported (rather than omitted) so worlds that
+// import build link cleanly against sqlite-lib  the bundle-cli
+// extension's baked-binary path is a native-only flow by design
+// (PLAN-bundles.md).
+impl BuildGuest for SqliteLib {
+    fn spawn_build(
+        _crate_root: String,
+        _target_triple: Option<String>,
+        _env: Vec<(String, String)>,
+    ) -> Result<BuildOut, SpiSqliteError> {
+        Err(SpiSqliteError {
+            code: 23, // SQLITE_PERM
+            extended_code: 23,
+            message:
+                "build.spawn-build: not supported in sqlite-lib browser-composed \
+                 runtime (process spawn unavailable inside the wasm sandbox)"
+                    .to_string(),
+        })
     }
 }
 
@@ -1011,6 +1042,7 @@ mod lib_load {
             LibCap::Dns => pol::Capability::Dns,
             LibCap::WalFrames => pol::Capability::WalFrames,
             LibCap::S3 => pol::Capability::S3,
+            LibCap::SpawnBuild => pol::Capability::SpawnBuild,
         }
     }
 
@@ -1030,6 +1062,7 @@ mod lib_load {
             pol::Capability::Dns => LibCap::Dns,
             pol::Capability::WalFrames => LibCap::WalFrames,
             pol::Capability::S3 => LibCap::S3,
+            pol::Capability::SpawnBuild => LibCap::SpawnBuild,
         }
     }
 

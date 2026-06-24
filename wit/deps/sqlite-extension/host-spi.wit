@@ -733,6 +733,59 @@ interface dns {
     resolve: func(name: string, record-type: record-type) -> result<list<string>, dns-error>;
 }
 
+/// Host-resident build SPI. Spawn `cargo` against a generated
+/// crate root and return the produced binary path. Substrate for
+/// PLAN-bundles.md (#445/#446)  the `bundle-cli` extension uses
+/// this to materialize the baked sqlink binary for a saved
+/// bundle.
+///
+/// Native impl: `std::process::Command` against the supplied
+/// `crate-root`. Captures stdout/stderr and returns
+/// `binary-path` resolved under the produced
+/// `target/<triple>/release/` directory. Respects the caller-
+/// supplied env tuples (passed through to the child).
+///
+/// Browser impl (sqlite-lib): stubbed  returns a clear
+/// `sqlite-error` since wasm sandboxes can't spawn cargo.
+///
+/// Capability gating: every method checks
+/// `manifest.declared-capabilities` for `capability::spawn-build`
+/// and returns `SQLITE_PERM` otherwise. The host owns the path
+/// validation hook  the spec keeps this interface narrow on
+/// purpose so the policy gate is the entire access control.
+interface build {
+    use types.{sqlite-error};
+
+    /// Output of a successful build. `binary-path` is an absolute
+    /// path on the host filesystem to the produced binary;
+    /// `stdout` / `stderr` are the captured streams from cargo
+    /// (useful for surfacing build progress / warnings to the
+    /// extension's caller).
+    record build-out {
+        binary-path: string,
+        stdout: string,
+        stderr: string,
+    }
+
+    /// Spawn `cargo build --release` against the supplied
+    /// `crate-root`. When `target-triple` is `some(<triple>)`,
+    /// the host passes `--target <triple>` so the build produces
+    /// the binary under `target/<triple>/release/`; otherwise
+    /// the default host target is used. The `env` tuples are
+    /// merged into the child process's environment (caller
+    /// values override the inherited environment, matching
+    /// `std::process::Command::env`).
+    ///
+    /// Returns `build-out` on success. Errors carry a
+    /// non-zero SQLITE_* code and a message that includes the
+    /// cargo exit status and the tail of stderr.
+    spawn-build: func(
+        crate-root: string,
+        target-triple: option<string>,
+        env: list<tuple<string, string>>,
+    ) -> result<build-out, sqlite-error>;
+}
+
 /// `sqlite3_session_*` API surfaced as named handles. Per
 /// PLAN-cli-stages-5-6.md Stage 6: the cli's old CLI_CONN-based
 /// `.session` was a no-op after Stage 3c (sessions captured

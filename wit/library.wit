@@ -61,6 +61,12 @@ interface library {
         /// S3-compatible object storage via `sqlite:extension/s3-base`.
         /// Substrate for the wal-archive extension's off-box sink.
         s3,
+        /// Host-resident cargo build via `sqlite:extension/build`.
+        /// Substrate for the bundle-cli extension's baked-binary
+        /// path. Browser-side this is stubbed (no process spawn);
+        /// the contract is still exported so worlds that import
+        /// build link cleanly against sqlite-lib.
+        spawn-build,
     }
 
     /// Mirrors `sqlite:extension/policy.method`.
