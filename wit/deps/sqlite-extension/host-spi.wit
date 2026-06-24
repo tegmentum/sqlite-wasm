@@ -156,6 +156,186 @@ interface wal-frames {
         -> result<list<u8>, sqlite-error>;
 }
 
+/// S3-compatible object storage SPI. Mirrors the `s3-base` interface
+/// from `~/git/s3-wasm` exactly (method signatures + types) so the
+/// native host bridge can pass parameters through untransformed if a
+/// later iteration switches from in-host (aws-sigv4 + reqwest) to
+/// composing the s3-wasm component into the host.
+///
+/// Native impl: signs requests with the aws-sigv4 Rust crate +
+/// dispatches via the host's existing reqwest blocking client.
+/// Browser impl (sqlite-lib): stubbed to a structured "not
+/// implemented" error until the polyfill bridge (fetch+SigV4 in JS)
+/// lands as a follow-up to #437.
+///
+/// Capability gating: every method checks
+/// `manifest.declared-capabilities` for `capability::s3` and
+/// returns `SQLITE_PERM` otherwise. Substrate for PLAN-wal-archive-
+/// extension.md (#440)  the wal-archive extension's primary off-box
+/// sink.
+interface s3-base {
+    use types.{sqlite-error};
+
+    /// S3 error variants. Same shape as s3-wasm's `s3-types.error`
+    /// so the bridge can map both directions without information
+    /// loss.
+    variant s3-error {
+        /// Invalid credentials or signature.
+        access-denied,
+        /// Bucket does not exist.
+        no-such-bucket,
+        /// Object does not exist.
+        no-such-key,
+        /// Invalid bucket name.
+        invalid-bucket-name,
+        /// Invalid request parameters.
+        invalid-request(string),
+        /// Network or connection error.
+        network-error(string),
+        /// XML parsing error.
+        parse-error(string),
+        /// Internal error.
+        internal(string),
+        /// Capability not granted at load time. Distinct from
+        /// access-denied (which is an S3-side authorization
+        /// failure) so callers can tell apart "operator denied
+        /// the grant" vs "the bucket policy rejected the key".
+        capability-not-granted,
+    }
+
+    /// Credentials for S3 authentication. `session-token` carries
+    /// STS-issued temporary credentials' opaque blob.
+    record s3-credentials {
+        access-key-id: string,
+        secret-access-key: string,
+        session-token: option<string>,
+    }
+
+    /// S3 endpoint configuration. `url` is the base endpoint, e.g.
+    /// `https://s3.amazonaws.com` or `http://localhost:9000` for a
+    /// MinIO / mock test server. `path-style` selects path-vs-
+    /// subdomain bucket addressing  required for most localhost
+    /// fixtures.
+    record s3-endpoint-config {
+        url: string,
+        region: string,
+        path-style: bool,
+    }
+
+    /// Object metadata returned by GET / HEAD.
+    record s3-object-metadata {
+        content-type: option<string>,
+        content-length: option<u64>,
+        etag: option<string>,
+        last-modified: option<u64>,
+        custom: list<tuple<string, string>>,
+    }
+
+    /// One row in a list-objects response.
+    record s3-object-info {
+        key: string,
+        size: u64,
+        etag: option<string>,
+        last-modified: option<u64>,
+        storage-class: option<string>,
+    }
+
+    /// Options for get-object.
+    record s3-get-object-options {
+        range: option<tuple<u64, u64>>,
+        if-match: option<string>,
+        if-none-match: option<string>,
+    }
+
+    /// Options for put-object.
+    record s3-put-object-options {
+        content-type: option<string>,
+        metadata: list<tuple<string, string>>,
+        cache-control: option<string>,
+    }
+
+    /// Options for list-objects.
+    record s3-list-objects-options {
+        prefix: option<string>,
+        delimiter: option<string>,
+        max-keys: option<u32>,
+        continuation-token: option<string>,
+    }
+
+    record s3-get-object-output {
+        body: list<u8>,
+        metadata: s3-object-metadata,
+    }
+
+    record s3-put-object-output {
+        etag: string,
+    }
+
+    record s3-head-object-output {
+        metadata: s3-object-metadata,
+    }
+
+    record s3-list-objects-output {
+        objects: list<s3-object-info>,
+        common-prefixes: list<string>,
+        next-continuation-token: option<string>,
+        is-truncated: bool,
+    }
+
+    /// Get an object from a bucket.
+    get-object: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        bucket: string,
+        key: string,
+        options: option<s3-get-object-options>,
+    ) -> result<s3-get-object-output, s3-error>;
+
+    /// Put an object into a bucket.
+    put-object: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        bucket: string,
+        key: string,
+        body: list<u8>,
+        options: option<s3-put-object-options>,
+    ) -> result<s3-put-object-output, s3-error>;
+
+    /// Delete an object from a bucket.
+    delete-object: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        bucket: string,
+        key: string,
+    ) -> result<_, s3-error>;
+
+    /// HEAD an object  metadata without the body.
+    head-object: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        bucket: string,
+        key: string,
+    ) -> result<s3-head-object-output, s3-error>;
+
+    /// List objects in a bucket.
+    list-objects: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        bucket: string,
+        options: option<s3-list-objects-options>,
+    ) -> result<s3-list-objects-output, s3-error>;
+
+    /// Copy an object within S3 (server-side, no local round-trip).
+    copy-object: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        source-bucket: string,
+        source-key: string,
+        dest-bucket: string,
+        dest-key: string,
+    ) -> result<s3-put-object-output, s3-error>;
+}
+
 /// Loader / host-specific extensions to `spi`. Distinct interface
 /// because these methods are about hosting OTHER extensions (the
 /// register-* trampolines + cli-mode toggles), not about querying

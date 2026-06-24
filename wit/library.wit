@@ -58,6 +58,9 @@ interface library {
         /// Raw WAL frame access via `sqlite:extension/wal-frames`.
         /// Substrate for the wal-archive extension.
         wal-frames,
+        /// S3-compatible object storage via `sqlite:extension/s3-base`.
+        /// Substrate for the wal-archive extension's off-box sink.
+        s3,
     }
 
     /// Mirrors `sqlite:extension/policy.method`.

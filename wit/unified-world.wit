@@ -116,6 +116,12 @@ world sqlite-library {
     /// worlds that import wal-frames can compose against
     /// sqlite-lib without panicking.
     export sqlite:extension/wal-frames@0.1.0;
+    /// S3-compatible object storage. Browser-side this returns
+    /// a structured "not implemented" error until the polyfill
+    /// bridge (fetch + SigV4 in JS) lands as a follow-up to
+    /// #437  the wal-archive extension's primary off-box sink
+    /// requires native deployment for v1.
+    export sqlite:extension/s3-base@0.1.0;
 
     export low-level;
     export high-level;

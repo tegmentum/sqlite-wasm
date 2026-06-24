@@ -44,6 +44,15 @@ interface policy {
         /// from `spi` so an extension can read WAL bytes without also
         /// holding the full SQL surface (and vice versa).
         wal-frames,
+        /// S3-compatible object storage (sqlite:extension/s3-base).
+        /// Substrate for the wal-archive extension's off-box sink.
+        /// Granting this lets the extension call get/put/delete/head/
+        /// list/copy against any S3-compatible endpoint (AWS S3,
+        /// MinIO, Cloudflare R2, etc.); the endpoint URL + credentials
+        /// are arguments to each call, not part of the policy  the
+        /// extension itself decides which bucket / region to hit. The
+        /// operator's grant is purely an allow-the-surface bit.
+        s3,
     }
 
     /// Outbound HTTP policy. Applied by the host's `http::handle`
