@@ -31,6 +31,7 @@ mod bindings {
 
 pub use sqlite_component_core::db;
 
+mod host_vtabs;
 mod state;
 
 use std::cell::RefCell;
@@ -1935,8 +1936,22 @@ mod host_scalars {
             register_host_wal_hook(ext_name, hook_id)
         }
 
+        fn register_host_vtab(
+            ext_name: String,
+            name: String,
+            vtab_id: u64,
+            eponymous: bool,
+            mutable: bool,
+            batched: bool,
+        ) -> Result<(), SpiSqliteError> {
+            super::host_vtabs::register_host_vtab(
+                ext_name, name, vtab_id, eponymous, mutable, batched,
+            )
+        }
+
         fn unregister_extension(ext_name: String) {
-            unregister_extension(ext_name)
+            super::host_vtabs::unregister_host_vtabs(&ext_name);
+            unregister_extension(ext_name);
         }
     }
 }
