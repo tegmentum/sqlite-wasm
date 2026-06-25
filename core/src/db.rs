@@ -921,6 +921,50 @@ impl Statement<'_> {
         Ok(())
     }
 
+    /// Zero-copy blob bind: hand sqlite3 a borrowed `&[u8]` without
+    /// first stuffing it into `Value::Blob(Vec<u8>)`. Uses
+    /// SQLITE_TRANSIENT (sqlite copies internally before step
+    /// returns), so the borrow only needs to outlive this call.
+    /// Useful in hot paths where the caller already holds the bytes
+    /// in a Vec/Box/slice and would otherwise pay a `to_vec()`.
+    pub fn bind_blob_ref(&mut self, index: i32, bytes: &[u8]) -> Result<(), Error> {
+        let rc = unsafe {
+            ffi::sqlite3_bind_blob(
+                self.raw,
+                index,
+                bytes.as_ptr() as *const c_void,
+                bytes.len() as c_int,
+                ffi::SQLITE_TRANSIENT(),
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            let db = unsafe { ffi::sqlite3_db_handle(self.raw) };
+            Err(unsafe { last_error(db) })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Zero-copy text bind, sibling of `bind_blob_ref`. Uses
+    /// SQLITE_TRANSIENT for the same reason.
+    pub fn bind_text_ref(&mut self, index: i32, text: &str) -> Result<(), Error> {
+        let rc = unsafe {
+            ffi::sqlite3_bind_text(
+                self.raw,
+                index,
+                text.as_ptr() as *const c_char,
+                text.len() as c_int,
+                ffi::SQLITE_TRANSIENT(),
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            let db = unsafe { ffi::sqlite3_db_handle(self.raw) };
+            Err(unsafe { last_error(db) })
+        } else {
+            Ok(())
+        }
+    }
+
     /// Number of result columns. 0 for non-SELECT statements.
     pub fn column_count(&self) -> usize {
         unsafe { ffi::sqlite3_column_count(self.raw) as usize }
@@ -2003,6 +2047,33 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0][0], Value::Text("bob".into()));
         assert_eq!(rows[0][1], Value::Integer(25));
+    }
+
+    #[test]
+    fn bind_blob_ref_roundtrips_without_copy() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE blobs(id INTEGER, data BLOB)").unwrap();
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let mut ins = c.prepare("INSERT INTO blobs VALUES(?1, ?2)").unwrap();
+        ins.bind(1, &Value::Integer(7)).unwrap();
+        ins.bind_blob_ref(2, &bytes).unwrap();
+        matches!(ins.step().unwrap(), StepResult::Done);
+        let mut sel = c.prepare("SELECT data FROM blobs WHERE id = 7").unwrap();
+        matches!(sel.step().unwrap(), StepResult::Row);
+        assert_eq!(sel.column_value(0), Value::Blob(bytes));
+    }
+
+    #[test]
+    fn bind_text_ref_roundtrips() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE t(name TEXT)").unwrap();
+        let s = "hello \u{1f600}";
+        let mut ins = c.prepare("INSERT INTO t VALUES(?1)").unwrap();
+        ins.bind_text_ref(1, s).unwrap();
+        matches!(ins.step().unwrap(), StepResult::Done);
+        let mut sel = c.prepare("SELECT name FROM t").unwrap();
+        matches!(sel.step().unwrap(), StepResult::Row);
+        assert_eq!(sel.column_value(0), Value::Text(s.into()));
     }
 
     #[test]
