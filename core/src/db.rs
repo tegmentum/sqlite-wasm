@@ -48,6 +48,18 @@ fn vfs_is_registered(name: &str) -> bool {
 /// SQL value — mirrors rusqlite's `types::Value`. Owned variants
 /// only (no borrowed columns); cli copies row data out before
 /// the next `step()` invalidates the column pointers.
+///
+/// New in @1.0.0: the `WitValue` arm mirrors the WIT contract's
+/// `sql-value::wit-value` variant. It carries a canonical-CBOR
+/// encoded WIT record plus the 32-byte `type-id` shape hash and
+/// the human-readable symbolic name. The SQLite C surface has no
+/// equivalent — at SQL bind / column / result boundaries the
+/// payload's `bytes` round-trip as `BLOB` (the type-id + symbolic
+/// name don't survive a SQLite column store, by design). The
+/// variant carries its full identity through every other layer
+/// (host marshaling, cas-cache snapshots, SPI conversion) so the
+/// wasm-to-wasm path can encode/decode without the SQL layer
+/// flattening the typed record into an opaque blob.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
@@ -55,6 +67,27 @@ pub enum Value {
     Real(f64),
     Text(String),
     Blob(Vec<u8>),
+    /// Canonical-CBOR-encoded WIT record (PLAN-wit-value-extension.md
+    /// Phase B). Mirrors the WIT `sql-value::wit-value(wit-value-
+    /// payload)` arm.
+    WitValue(WitValuePayload),
+}
+
+/// Mirror of the WIT `wit-value-payload` record. Carries the
+/// authoritative match key (`type_id`), the canonical-CBOR bytes,
+/// and a diagnostic symbolic name.
+///
+/// `type_id` is fixed at 32 bytes (sha256 of the `canon:wit`
+/// normalized record shape per `canon:wit` Tier 2 — see
+/// PLAN-wit-value-extension.md DD2). The WIT-bindings type carries
+/// a `list<u8>` for flexibility; the host validates / pads to 32
+/// bytes on the boundary so internal code can rely on a fixed-size
+/// array.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WitValuePayload {
+    pub type_id: [u8; 32],
+    pub bytes: Vec<u8>,
+    pub symbolic_name: String,
 }
 
 /// Error returned by every fallible db.rs operation. Carries the
@@ -903,6 +936,18 @@ impl Statement<'_> {
                     b.len() as c_int,
                     ffi::SQLITE_TRANSIENT(),
                 ),
+                // SQLite has no first-class typed-record cell; bind
+                // the canonical-CBOR bytes as BLOB. type-id +
+                // symbolic-name don't survive the SQL-layer flatten
+                // (by design — the typed identity is recovered on
+                // the wasm side via the per-extension registry).
+                Value::WitValue(p) => ffi::sqlite3_bind_blob(
+                    self.raw,
+                    index,
+                    p.bytes.as_ptr() as *const c_void,
+                    p.bytes.len() as c_int,
+                    ffi::SQLITE_TRANSIENT(),
+                ),
             }
         };
         if rc != ffi::SQLITE_OK {
@@ -1182,6 +1227,15 @@ unsafe fn set_result_value(ctx: *mut ffi::sqlite3_context, v: &Value) {
             ctx,
             b.as_ptr() as *const c_void,
             b.len() as c_int,
+            ffi::SQLITE_TRANSIENT(),
+        ),
+        // SQLite has no typed-record cell; surface the canonical-
+        // CBOR bytes as BLOB. The wasm bridge round-trips the typed
+        // identity via the per-extension typed-value registry.
+        Value::WitValue(p) => ffi::sqlite3_result_blob(
+            ctx,
+            p.bytes.as_ptr() as *const c_void,
+            p.bytes.len() as c_int,
             ffi::SQLITE_TRANSIENT(),
         ),
     }
