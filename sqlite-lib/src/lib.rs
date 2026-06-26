@@ -201,6 +201,81 @@ fn shared_conn() -> std::rc::Rc<RefCell<db::Connection>> {
     })
 }
 
+// ────────────── CAS-cache connection ──────────────
+//
+// Separate-from-user-data connection serving `dispatch-bridge.
+// bridged-execute-cas`. The browser composed runtime's
+// `sqlite:extension/bundles` polyfill routes every bundle CRUD
+// through this connection so the bundle registry can persist
+// independently of the user's data db.
+//
+// Substrate intent:
+//   * native: opens `~/.cache/sqlink/cas.db` with the default
+//     VFS. Native dispatch in practice goes through the
+//     sqlink-host's direct rusqlite connection (cas-cache's
+//     `bundles_exec` free functions), not through this bridge
+//     entry — but the bridge entry still works on native so
+//     embedders that wire only the composed cli (not the
+//     full native host) get a functional cas db.
+//   * wasm32: TEMPORARY `:memory:` until the OPFS-backed VFS
+//     lands. Schema survives the page lifetime but NOT a
+//     reload. The browser polyfill re-runs `INSTALL_SCHEMA` on
+//     every fresh load to compensate.
+thread_local! {
+    static SHARED_CAS_CONN: RefCell<Option<std::rc::Rc<RefCell<db::Connection>>>>
+        = const { RefCell::new(None) };
+}
+
+fn shared_cas_conn() -> std::rc::Rc<RefCell<db::Connection>> {
+    SHARED_CAS_CONN.with(|c| {
+        let mut g = c.borrow_mut();
+        if g.is_none() {
+            tvm_cold_tier_init();
+            #[cfg(target_arch = "wasm32")]
+            let conn = {
+                // TODO(v1.6): open with vfs=opfs once the OPFS-backed
+                // VFS lands. Until then the cas db is process-lifetime
+                // only; the polyfill re-bootstraps the schema on every
+                // page load.
+                db::Connection::open_in_memory()
+                    .expect("open in-memory cas connection (wasm32 transitional)")
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let conn = {
+                let path = cas_db_path_native();
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                db::Connection::open(&path, db::OpenFlags::DEFAULT)
+                    .expect("open ~/.cache/sqlink/cas.db for bridged-execute-cas")
+            };
+            *g = Some(std::rc::Rc::new(RefCell::new(conn)));
+        }
+        g.as_ref().unwrap().clone()
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cas_db_path_native() -> String {
+    // Mirror sqlite-cas-cache's path convention without adding a
+    // dep on it here — the cas-cache crate isn't in sqlite-lib's
+    // dep graph and shouldn't be (sqlite-lib is the lower layer).
+    if let Ok(env) = std::env::var("SQLINK_CACHE_DIR") {
+        return format!("{env}/cas.db");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return format!("{home}/.cache/sqlink/cas.db");
+    }
+    // Last-ditch fallback: cwd-local cas.db. Better than panic.
+    "cas.db".to_string()
+}
+
+fn cas_with<R>(f: impl FnOnce(&db::Connection) -> R) -> R {
+    let rc = shared_cas_conn();
+    let conn = rc.borrow();
+    f(&conn)
+}
+
 fn spi_with<R>(f: impl FnOnce(&db::Connection) -> R) -> R {
     let rc = shared_conn();
     let conn = rc.borrow();
@@ -2013,6 +2088,35 @@ mod host_scalars {
             params: Vec<SpiSqlValue>,
         ) -> Result<SpiQueryResult, SpiSqliteError> {
             <super::SqliteLib as SpiGuest>::execute(sql, params)
+        }
+
+        // Mirror `bridged_execute` but route to the cas connection
+        // (`shared_cas_conn`) instead of the user-data connection.
+        // Encoding shape matches `SpiGuest::execute` exactly.
+        fn bridged_execute_cas(
+            sql: String,
+            params: Vec<SpiSqlValue>,
+        ) -> Result<SpiQueryResult, SpiSqliteError> {
+            super::cas_with(|conn| {
+                let mut stmt = conn.prepare(&sql).map_err(|e| super::spi_db_err(e.clone()))?;
+                let columns = stmt.column_names();
+                let dbs: Vec<super::db::Value> =
+                    params.into_iter().map(super::spi_value_to_db).collect();
+                stmt.bind_all(&dbs).map_err(|e| super::spi_db_err(e.clone()))?;
+                let rows_vals = stmt
+                    .collect_rows()
+                    .map_err(|e| super::spi_db_err(e.clone()))?;
+                let rows: Vec<Vec<SpiSqlValue>> = rows_vals
+                    .into_iter()
+                    .map(|r| r.into_iter().map(super::db_to_spi_value).collect())
+                    .collect();
+                Ok(SpiQueryResult {
+                    columns,
+                    rows,
+                    changes: conn.changes(),
+                    last_insert_rowid: conn.last_insert_rowid(),
+                })
+            })
         }
 
         fn register_host_scalar(
