@@ -32,7 +32,27 @@ package sqlink:wasm@0.1.0;
 /// On `.unload`, the JS host calls `unregister-extension(ext-name)`
 /// and sqlite-lib drops every trampoline keyed under that ext-name.
 interface dispatch-bridge {
-    use sqlite:extension/types@0.1.0.{sqlite-error};
+    use sqlite:extension/types@0.1.0.{sqlite-error, sql-value, query-result};
+
+    /// Bridged `sqlite:extension/spi.execute`. Cli-family extensions
+    /// loaded outside the composed binary (e.g. JS-side runtime-bindgen
+    /// in browser) cannot reach the internal `sqlite:extension/spi`
+    /// instance the cli/lib pair was composed with — the WAC recipe
+    /// wires that handoff internally and the outer world doesn't
+    /// re-export it. This entry on the already-public dispatch-bridge
+    /// gives them a way in: proxies to sqlite-lib's internal
+    /// `spi.execute` against the same shared connection the cli sees,
+    /// so a browser-side extension running
+    /// `spi.execute("SELECT * FROM __sqlink_prefix")` reads the rows
+    /// the composed cli just wrote via the same connection.
+    ///
+    /// Native cli-family extensions still bind `sqlite:extension/spi`
+    /// directly through native wit-bindgen — this is the import-fallback
+    /// shape for the browser scenario.
+    bridged-execute: func(
+        sql: string,
+        params: list<sql-value>,
+    ) -> result<query-result, sqlite-error>;
 
     /// Register a host-resident scalar function on sqlite-lib's
     /// internal connection. When SQL invokes `name`, sqlite-lib
