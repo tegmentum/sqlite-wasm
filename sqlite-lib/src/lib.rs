@@ -32,6 +32,8 @@ mod bindings {
 pub use sqlite_component_core::db;
 
 mod host_vtabs;
+#[cfg(target_arch = "wasm32")]
+mod opfs_backend;
 mod state;
 
 use std::cell::RefCell;
@@ -79,6 +81,13 @@ fn tvm_cold_tier_init() {
     ONCE.call_once(|| {
         let _ = sqlite_pcache_tvm::install();
         let _ = sqlite_vfs_tvm::install();
+        // v1.5 round 4: register the `opfs` VFS so
+        // `shared_cas_conn` can open against navigator.storage's OPFS
+        // root. Backend is registered with sqlite-vfs-tvm BEFORE the
+        // VFS install — the install only allocates the VFS table;
+        // first use calls into the backend.
+        sqlite_vfs_tvm::opfs::register_backend(Box::new(opfs_backend::WitOpfsBackend));
+        let _ = sqlite_vfs_tvm::opfs::install();
     });
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -233,12 +242,21 @@ fn shared_cas_conn() -> std::rc::Rc<RefCell<db::Connection>> {
             tvm_cold_tier_init();
             #[cfg(target_arch = "wasm32")]
             let conn = {
-                // TODO(v1.6): open with vfs=opfs once the OPFS-backed
-                // VFS lands. Until then the cas db is process-lifetime
-                // only; the polyfill re-bootstraps the schema on every
-                // page load.
-                db::Connection::open_in_memory()
-                    .expect("open in-memory cas connection (wasm32 transitional)")
+                // v1.5 round 4: open through the `opfs` VFS so the cas
+                // db persists across page reloads. The path is the OPFS
+                // path the host's WIT impl materializes — leading slash
+                // stripped by the host since OPFS doesn't have a true
+                // root concept beyond the per-origin storage root.
+                // Bytes flow through sqlite-vfs-tvm/src/opfs.rs's IO
+                // methods, which call into the WIT-imported opfs-host
+                // interface; under JSPI those imports suspend the wasm
+                // guest until the host's Promise resolves.
+                db::Connection::open_with_vfs(
+                    "/sqlink/cas.db",
+                    db::OpenFlags::DEFAULT,
+                    Some(sqlite_vfs_tvm::opfs::name()),
+                )
+                .expect("open cas.db via opfs VFS")
             };
             #[cfg(not(target_arch = "wasm32"))]
             let conn = {
