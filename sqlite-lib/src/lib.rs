@@ -1327,7 +1327,10 @@ mod host_scalars {
     use super::spi_db_err;
     use crate::db;
     use bindings::exports::sqlink::wasm::dispatch_bridge::Guest as DispatchBridgeGuest;
-    use bindings::exports::sqlite::extension::spi::SqliteError as SpiSqliteError;
+    use bindings::exports::sqlite::extension::spi::{
+        Guest as SpiGuest, QueryResult as SpiQueryResult, SqlValue as SpiSqlValue,
+        SqliteError as SpiSqliteError,
+    };
     use bindings::sqlite::extension::types::SqlValue as ImpSqlValue;
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -2005,6 +2008,13 @@ mod host_scalars {
     }
 
     impl DispatchBridgeGuest for super::SqliteLib {
+        fn bridged_execute(
+            sql: String,
+            params: Vec<SpiSqlValue>,
+        ) -> Result<SpiQueryResult, SpiSqliteError> {
+            <super::SqliteLib as SpiGuest>::execute(sql, params)
+        }
+
         fn register_host_scalar(
             ext_name: String,
             name: String,
