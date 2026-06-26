@@ -148,4 +148,12 @@ world sqlite-library {
 
     import extension-loader;
     import dispatch;
+    /// Host-implemented OPFS file ops backing the `opfs` VFS the
+    /// browser composed runtime uses for `shared_cas_conn` so the
+    /// cas db survives page reloads. See wit/opfs-host.wit for the
+    /// per-op contract. Native sqlite-lib targets satisfy this with
+    /// a stub (cas db opens against the native filesystem and never
+    /// calls into opfs-host); the browser composed cli wires this
+    /// to navigator.storage.getDirectory().
+    import opfs-host;
 }

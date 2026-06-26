@@ -56,6 +56,14 @@ use parking_lot::Mutex;
 
 pub mod storage;
 
+/// `"opfs"` VFS — file bytes live in the JS host's OPFS via the
+/// WIT-imported `sqlink:wasm/opfs-host` interface. Backend lives in
+/// sqlite-lib (which holds the wit-bindgen import shims); this
+/// crate just registers the VFS table and trampolines into a
+/// dyn-trait callback. Native sqlite-lib supplies a stub backend
+/// so the VFS still registers, returning SQLITE_CANTOPEN on use.
+pub mod opfs;
+
 // On wasm32 the file storage is normally a multi-memory pool-backed
 // storage: file bytes live in pool 2 of the `tvm-guest-mm`
 // shell, accessed through the `tvm-guest-mm-rt` dispatch
