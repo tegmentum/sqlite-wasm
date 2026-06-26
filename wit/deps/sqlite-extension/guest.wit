@@ -166,6 +166,29 @@ interface metadata {
         /// capabilities` and `optional-capabilities` are treated as
         /// declared (the strict gate wins).
         optional-capabilities: list<capability>,
+        /// OPTIONAL in v1, REQUIRED in v1.1: the short prefix this
+        /// extension wants for SPARQL-style function namespacing
+        /// (PLAN-prefixes.md). Example: 'foaf'. Combined with
+        /// `prefix-expansion` to give each registered function both
+        /// a bare form (`name`, last-wins SQLite default semantics)
+        /// and a qualified form (`prefix__name`, always-available
+        /// for explicit dispatch).
+        ///
+        /// When missing in v1, the host synthesizes
+        ///   prefix    = sanitize(<crate-name>)
+        ///   expansion = "sqlink-internal://<crate-name>"
+        /// and emits a deprecation warning. v1.1 makes both fields
+        /// required at load time.
+        preferred-prefix: option<string>,
+        /// OPTIONAL in v1, REQUIRED in v1.1: opaque expansion string
+        /// that gives the prefix its global identity. Format is NOT
+        /// validated: can be a URI ('http://xmlns.com/foaf/0.1/'),
+        /// a Java-style namespace ('com.tegmentum.sqlink'), a UUID,
+        /// or any opaque token the extension author picks. Function
+        /// identity in `__sqlink_prefix_function` keys on this
+        /// expansion, not on the short prefix  the prefix is a
+        /// per-database alias for the expansion.
+        prefix-expansion: option<string>,
     }
 
     /// Return the extension's full manifest. Called once by the host
