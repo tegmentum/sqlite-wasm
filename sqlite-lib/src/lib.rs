@@ -1420,6 +1420,7 @@ mod host_scalars {
     use super::spi_db_err;
     use crate::db;
     use bindings::exports::sqlink::wasm::dispatch_bridge::Guest as DispatchBridgeGuest;
+    use bindings::exports::sqlink::wasm::dispatch_bridge_cas::Guest as DispatchBridgeCasGuest;
     use bindings::exports::sqlite::extension::spi::{
         Guest as SpiGuest, QueryResult as SpiQueryResult, SqlValue as SpiSqlValue,
         SqliteError as SpiSqliteError,
@@ -2108,35 +2109,6 @@ mod host_scalars {
             <super::SqliteLib as SpiGuest>::execute(sql, params)
         }
 
-        // Mirror `bridged_execute` but route to the cas connection
-        // (`shared_cas_conn`) instead of the user-data connection.
-        // Encoding shape matches `SpiGuest::execute` exactly.
-        fn bridged_execute_cas(
-            sql: String,
-            params: Vec<SpiSqlValue>,
-        ) -> Result<SpiQueryResult, SpiSqliteError> {
-            super::cas_with(|conn| {
-                let mut stmt = conn.prepare(&sql).map_err(|e| super::spi_db_err(e.clone()))?;
-                let columns = stmt.column_names();
-                let dbs: Vec<super::db::Value> =
-                    params.into_iter().map(super::spi_value_to_db).collect();
-                stmt.bind_all(&dbs).map_err(|e| super::spi_db_err(e.clone()))?;
-                let rows_vals = stmt
-                    .collect_rows()
-                    .map_err(|e| super::spi_db_err(e.clone()))?;
-                let rows: Vec<Vec<SpiSqlValue>> = rows_vals
-                    .into_iter()
-                    .map(|r| r.into_iter().map(super::db_to_spi_value).collect())
-                    .collect();
-                Ok(SpiQueryResult {
-                    columns,
-                    rows,
-                    changes: conn.changes(),
-                    last_insert_rowid: conn.last_insert_rowid(),
-                })
-            })
-        }
-
         fn register_host_scalar(
             ext_name: String,
             name: String,
@@ -2203,6 +2175,42 @@ mod host_scalars {
         fn unregister_extension(ext_name: String) {
             super::host_vtabs::unregister_host_vtabs(&ext_name);
             unregister_extension(ext_name);
+        }
+    }
+
+    // `dispatch-bridge-cas` is the CAS-cache slice split out of
+    // `dispatch-bridge`. Composed binary keeps serving the same SQL
+    // surface against the in-WASM `shared_cas_conn`; native sqlink-
+    // host has its own `impl dispatch_bridge_cas::Host` against
+    // `Cache::with_bundles_conn`. Body mirrors the pre-split
+    // `bridged_execute_cas` body verbatim — encoding shape matches
+    // `SpiGuest::execute` for caller-side reuse of param/row
+    // marshaling helpers.
+    impl DispatchBridgeCasGuest for super::SqliteLib {
+        fn bridged_execute_cas(
+            sql: String,
+            params: Vec<SpiSqlValue>,
+        ) -> Result<SpiQueryResult, SpiSqliteError> {
+            super::cas_with(|conn| {
+                let mut stmt = conn.prepare(&sql).map_err(|e| super::spi_db_err(e.clone()))?;
+                let columns = stmt.column_names();
+                let dbs: Vec<super::db::Value> =
+                    params.into_iter().map(super::spi_value_to_db).collect();
+                stmt.bind_all(&dbs).map_err(|e| super::spi_db_err(e.clone()))?;
+                let rows_vals = stmt
+                    .collect_rows()
+                    .map_err(|e| super::spi_db_err(e.clone()))?;
+                let rows: Vec<Vec<SpiSqlValue>> = rows_vals
+                    .into_iter()
+                    .map(|r| r.into_iter().map(super::db_to_spi_value).collect())
+                    .collect();
+                Ok(SpiQueryResult {
+                    columns,
+                    rows,
+                    changes: conn.changes(),
+                    last_insert_rowid: conn.last_insert_rowid(),
+                })
+            })
         }
     }
 }

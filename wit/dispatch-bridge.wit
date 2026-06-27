@@ -54,37 +54,6 @@ interface dispatch-bridge {
         params: list<sql-value>,
     ) -> result<query-result, sqlite-error>;
 
-    /// Bridged execute against sqlite-lib's CAS-cache connection
-    /// (separate from the user-data shared connection
-    /// `bridged-execute` routes to). Same shape and semantics as
-    /// `bridged-execute` but the target is the cas db, which on
-    /// native lives at `~/.cache/sqlink/cas.db` and in the browser
-    /// is opened with an OPFS-backed VFS so the schema survives
-    /// page reloads.
-    ///
-    /// Existence rationale: `sqlite:extension/bundles` is a host
-    /// capability the cli + bundle-cli consume to read/write the
-    /// CAS-cache bundle registry. Native sqlink-host services it
-    /// directly against the cas connection. In the browser composed
-    /// scenario there is no host process owning the cas db  the
-    /// JS-side `sqlite:extension/bundles` polyfill drives every
-    /// bundle CRUD through this entry, treating the cas connection
-    /// the same way `bridged-execute` treats the user-data
-    /// connection. Schema bootstrap is the polyfill's responsibility
-    /// (it runs `sqlite_cas_cache::schema::INSTALL_SCHEMA` and
-    /// friends through this entry on first call).
-    ///
-    /// v1.5 round 3: the cas connection is opened lazily on first
-    /// call. Until the OPFS-backed VFS lands, the browser cas
-    /// connection is `:memory:` (does NOT survive reload). The OPFS
-    /// VFS work is deferred to a follow-up round; the WIT shape and
-    /// the polyfill surface are intentionally stable across that
-    /// transition.
-    bridged-execute-cas: func(
-        sql: string,
-        params: list<sql-value>,
-    ) -> result<query-result, sqlite-error>;
-
     /// Register a host-resident scalar function on sqlite-lib's
     /// internal connection. When SQL invokes `name`, sqlite-lib
     /// calls back to the host via the imported
@@ -266,4 +235,47 @@ interface dispatch-bridge {
     /// Idempotent: unregistering an extension with no registrations
     /// is a no-op.
     unregister-extension: func(ext-name: string);
+}
+
+/// CAS-cache slice of the dispatch-bridge surface.
+///
+/// Split out of `dispatch-bridge` so the native sqlink-host can
+/// implement just this method without standing up the 11
+/// register-host-* trampolines that only make sense inside the
+/// composed wasm binary (they install
+/// `sqlite3_create_function_v2` hooks on sqlite-lib's internal
+/// connection — a substrate the native host doesn't expose to
+/// loaded extensions).
+///
+/// Consumed by:
+///   - `extensions/bundle-cli` (and any future CAS-touching cli
+///     extension) via the `bundle-cli` world.
+///   - The native sqlink-host via `impl dispatch_bridge_cas::Host
+///     for LoadedState`, routing to `Cache::with_bundles_conn`.
+///   - The composed binary's sqlite-lib via
+///     `impl DispatchBridgeCasGuest`, routing to `cas_with` (the
+///     same target the original `dispatch-bridge.bridged-execute-cas`
+///     served before the split).
+///
+/// Same `(sql, params) -> result<query-result, sqlite-error>`
+/// shape as `dispatch-bridge.bridged-execute` so callers can
+/// share encoding helpers. Schema bootstrap is the caller's
+/// responsibility (native host runs it via the existing
+/// `Cache::with_bundles_conn` path; browser polyfill — soon to
+/// be deleted — used to drive it from JS).
+interface dispatch-bridge-cas {
+    use sqlite:extension/types@0.1.0.{sqlite-error, sql-value, query-result};
+
+    /// Bridged execute against sqlite-lib's CAS-cache connection.
+    /// Native host: `~/.cache/sqlink/cas.db`. Composed binary
+    /// (browser): the in-WASM cas connection sqlite-lib maintains
+    /// behind `cas_with`. The two callers see the same SQL
+    /// surface — the bundles-CRUD strings in
+    /// `sqlite_cas_cache::bundles_exec` and the schema bootstrap
+    /// strings in `sqlite_cas_cache::schema` (shared crate, single
+    /// source of truth).
+    bridged-execute-cas: func(
+        sql: string,
+        params: list<sql-value>,
+    ) -> result<query-result, sqlite-error>;
 }
