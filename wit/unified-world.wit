@@ -145,6 +145,15 @@ world sqlite-library {
     /// the host via the imported `dispatch.scalar-call`. See
     /// `wit/dispatch-bridge.wit` for the full lifecycle.
     export dispatch-bridge;
+    /// CAS-cache `bridged-execute-cas` slice, split out of
+    /// `dispatch-bridge` so consumers that only need cas-conn SQL
+    /// access (the bundle-cli extension; the native sqlink-host)
+    /// don't carry the 11 register-host-* trampolines. The browser
+    /// composed binary continues to export both: sqlite-lib's
+    /// composed runtime serves cas reads/writes through this
+    /// interface the same way it previously did through
+    /// `dispatch-bridge.bridged-execute-cas`.
+    export dispatch-bridge-cas;
 
     import extension-loader;
     import dispatch;
