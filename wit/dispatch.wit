@@ -19,8 +19,8 @@ package sqlink:wasm@0.1.0;
 /// the per-slot direct calls in extension-unified.c. This interface
 /// only fires for slots registered via the dynamic `.load` path.
 interface dispatch {
-    use sqlite:extension/types@0.1.0.{sql-value, auth-action, auth-result, update-operation};
-    use sqlite:extension/vtab@0.1.0.{index-info, index-plan};
+    use sqlite:extension/types@1.0.0.{sql-value, auth-action, auth-result, update-operation};
+    use sqlite:extension/vtab@1.0.0.{index-info, index-plan};
 
     /// Invoke `func-id` on the extension previously loaded under
     /// `ext-name`, with the given arguments. Errors out if no such

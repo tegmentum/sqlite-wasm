@@ -34,10 +34,10 @@ world sqlite-cli-unified {
     export low-level;
     export high-level;
 
-    export sqlite:extension/types@0.1.0;
-    export sqlite:extension/spi@0.1.0;
-    export sqlite:extension/logging@0.1.0;
-    export sqlite:extension/config@0.1.0;
+    export sqlite:extension/types@1.0.0;
+    export sqlite:extension/spi@1.0.0;
+    export sqlite:extension/logging@1.0.0;
+    export sqlite:extension/config@1.0.0;
 
     import fts5-slot;
     import json1-slot;
@@ -80,10 +80,10 @@ world sqlite-cli-command {
     /// the host wires them in so subsequent stages can migrate
     /// eval_sql + dot.rs callers off the local connection one
     /// path at a time.
-    import sqlite:extension/spi@0.1.0;
-    import sqlite:extension/spi-loader@0.1.0;
-    import sqlite:extension/prepared@0.1.0;
-    import sqlite:extension/session@0.1.0;
+    import sqlite:extension/spi@1.0.0;
+    import sqlite:extension/spi-loader@1.0.0;
+    import sqlite:extension/prepared@1.0.0;
+    import sqlite:extension/session@1.0.0;
 }
 
 /// Programmatic SQLite library world.
@@ -106,34 +106,34 @@ world sqlite-cli-command {
 /// that don't need dynamic loading can satisfy `extension-loader`
 /// with a stub.
 world sqlite-library {
-    export sqlite:extension/types@0.1.0;
-    export sqlite:extension/spi@0.1.0;
-    export sqlite:extension/logging@0.1.0;
-    export sqlite:extension/config@0.1.0;
+    export sqlite:extension/types@1.0.0;
+    export sqlite:extension/spi@1.0.0;
+    export sqlite:extension/logging@1.0.0;
+    export sqlite:extension/config@1.0.0;
     /// Raw WAL-frame access. Browser-side this returns the
     /// documented no-WAL sentinels until vfs-tvm grows WAL
     /// support (#437); the contract stays honored so widened
     /// worlds that import wal-frames can compose against
     /// sqlite-lib without panicking.
-    export sqlite:extension/wal-frames@0.1.0;
+    export sqlite:extension/wal-frames@1.0.0;
     /// S3-compatible object storage. Browser-side this returns
     /// a structured "not implemented" error until the polyfill
     /// bridge (fetch + SigV4 in JS) lands as a follow-up to
     /// #437  the wal-archive extension's primary off-box sink
     /// requires native deployment for v1.
-    export sqlite:extension/s3-base@0.1.0;
+    export sqlite:extension/s3-base@1.0.0;
     /// Host-resident cargo build. Browser-side this is stubbed
     /// (wasm sandboxes can't spawn cargo); the contract is
     /// exported so worlds that import build link cleanly
     /// against sqlite-lib. The bundle-cli extension's baked-
     /// binary path requires native deployment by design.
-    export sqlite:extension/build@0.1.0;
+    export sqlite:extension/build@1.0.0;
     /// Bundle registry CRUD. Browser-side this is stubbed
     /// (no host cas-cache reachable from the wasm sandbox);
     /// the contract is exported so worlds that import bundles
     /// link cleanly against sqlite-lib. A future browser
     /// deployment can implement IndexedDB-backed bundles.
-    export sqlite:extension/bundles@0.1.0;
+    export sqlite:extension/bundles@1.0.0;
 
     export low-level;
     export high-level;

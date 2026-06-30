@@ -312,6 +312,19 @@ unsafe fn wit_to_sqlite3_result(ctx: *mut ffi::sqlite3_context, v: ImpSqlValue) 
                 ffi::SQLITE_TRANSIENT(),
             );
         }
+        // @1.0.0 wit-value arm. The SQLite C surface has no typed-
+        // record equivalent; at this result boundary the payload
+        // flattens to a BLOB carrying its canonical-CBOR bytes (the
+        // type-id + symbolic name don't survive a SQLite column
+        // store, by design — see db::Value's contract).
+        ImpSqlValue::WitValue(p) => {
+            ffi::sqlite3_result_blob(
+                ctx,
+                p.bytes.as_ptr() as *const c_void,
+                p.bytes.len() as c_int,
+                ffi::SQLITE_TRANSIENT(),
+            );
+        }
     }
 }
 

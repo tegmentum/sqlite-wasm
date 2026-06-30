@@ -10,32 +10,32 @@ package sqlink:wasm@0.1.0;
 /// `sqlink:wasm` because that's what the composer disambiguates by.
 
 interface fts5-slot {
-    use sqlite:extension/types@0.1.0.{sql-value};
-    use sqlite:extension/metadata@0.1.0.{manifest};
+    use sqlite:extension/types@1.0.0.{sql-value};
+    use sqlite:extension/metadata@1.0.0.{manifest};
 
     describe: func() -> manifest;
     call: func(func-id: u64, args: list<sql-value>) -> result<sql-value, string>;
 }
 
 interface json1-slot {
-    use sqlite:extension/types@0.1.0.{sql-value};
-    use sqlite:extension/metadata@0.1.0.{manifest};
+    use sqlite:extension/types@1.0.0.{sql-value};
+    use sqlite:extension/metadata@1.0.0.{manifest};
 
     describe: func() -> manifest;
     call: func(func-id: u64, args: list<sql-value>) -> result<sql-value, string>;
 }
 
 interface rtree-slot {
-    use sqlite:extension/types@0.1.0.{sql-value};
-    use sqlite:extension/metadata@0.1.0.{manifest};
+    use sqlite:extension/types@1.0.0.{sql-value};
+    use sqlite:extension/metadata@1.0.0.{manifest};
 
     describe: func() -> manifest;
     call: func(func-id: u64, args: list<sql-value>) -> result<sql-value, string>;
 }
 
 interface geopoly-slot {
-    use sqlite:extension/types@0.1.0.{sql-value};
-    use sqlite:extension/metadata@0.1.0.{manifest};
+    use sqlite:extension/types@1.0.0.{sql-value};
+    use sqlite:extension/metadata@1.0.0.{manifest};
 
     describe: func() -> manifest;
     call: func(func-id: u64, args: list<sql-value>) -> result<sql-value, string>;
@@ -45,8 +45,8 @@ interface geopoly-slot {
 /// implementing this slot can declare arbitrary scalar functions that
 /// the host registers and dispatches like any other slot's exports.
 interface demo-slot {
-    use sqlite:extension/types@0.1.0.{sql-value};
-    use sqlite:extension/metadata@0.1.0.{manifest};
+    use sqlite:extension/types@1.0.0.{sql-value};
+    use sqlite:extension/metadata@1.0.0.{manifest};
 
     describe: func() -> manifest;
     call: func(func-id: u64, args: list<sql-value>) -> result<sql-value, string>;

@@ -1,4 +1,4 @@
-package sqlite:extension@0.1.0;
+package sqlite:extension@1.0.0;
 
 /// Minimal extension — read-only SQL + scalar functions. Suitable for
 /// stateless pure functions: text transforms, math, hashing.
@@ -331,6 +331,37 @@ world dotcmd-aware {
     /// implement `.sqlink install`; ordinary dot-command
     /// extensions ignore it.
     import loader-bridge;
+
+    export metadata;
+    export scalar-function;
+    export dot-command;
+}
+
+/// Purpose-built world for the `.bundle` dot-command extension.
+/// Same shape as `dotcmd-aware` minus `wal-frames` / `s3-base`
+/// (bundle-cli has no use for either) plus
+/// `dispatch-bridge-cas` for direct CAS-cache SQL access.
+///
+/// #554 cleanup: `import bundles;` dropped. Every bundle-cli
+/// call site now drives the CAS-cache through
+/// `dispatch-bridge-cas.bridged-execute-cas` against the
+/// `sqlite_cas_cache::bundles_exec::*_SQL` strings (vendored at
+/// `extensions/bundle-cli/src/sql.rs`); the typed
+/// `bundles::Host` impl is unused on this world's behalf. Other
+/// worlds (minimal, dotcmd-aware, etc.) still import bundles,
+/// so the host's `bundles::Host` impl stays satisfied.
+world bundle-cli {
+    import types;
+    import spi;
+    import session;
+    import logging;
+    import config;
+    import cli-stdout;
+    import cli-stderr;
+    import cli-state;
+    import build;
+    import loader-bridge;
+    import dispatch-bridge-cas;
 
     export metadata;
     export scalar-function;

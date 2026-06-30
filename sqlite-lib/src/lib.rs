@@ -145,6 +145,28 @@ fn spi_db_err(e: db::Error) -> SpiSqliteError {
     }
 }
 
+// ── @1.0.0 wit-value payload bridging ──
+// The `sql-value::wit-value` arm (new in sqlite:extension@1.0.0)
+// carries a canonical-CBOR-encoded WIT record plus its 32-byte
+// `type-id` shape hash and a diagnostic symbolic name. The SPI /
+// host-marshaling layers preserve the payload's full identity
+// (per `db::Value`'s doc-comment); only the actual SQLite C
+// bind/column boundary flattens it to a BLOB. These helpers bridge
+// the WIT-bindings payload (type-id as `list<u8>`) to the core
+// `db::WitValuePayload` (type-id as a fixed `[u8; 32]`), padding /
+// truncating to 32 bytes — the host validates length on its own
+// boundary, so internal code can rely on the fixed size.
+fn db_payload_to_wit_type_id(id: [u8; 32]) -> Vec<u8> {
+    id.to_vec()
+}
+
+fn wit_type_id_to_db(id: Vec<u8>) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let n = id.len().min(32);
+    out[..n].copy_from_slice(&id[..n]);
+    out
+}
+
 fn db_to_spi_value(v: db::Value) -> SpiSqlValue {
     match v {
         db::Value::Null => SpiSqlValue::Null,
@@ -152,6 +174,13 @@ fn db_to_spi_value(v: db::Value) -> SpiSqlValue {
         db::Value::Real(r) => SpiSqlValue::Real(r),
         db::Value::Text(s) => SpiSqlValue::Text(s),
         db::Value::Blob(b) => SpiSqlValue::Blob(b),
+        db::Value::WitValue(p) => SpiSqlValue::WitValue(
+            bindings::exports::sqlite::extension::types::WitValuePayload {
+                type_id: db_payload_to_wit_type_id(p.type_id),
+                bytes: p.bytes,
+                symbolic_name: p.symbolic_name,
+            },
+        ),
     }
 }
 
@@ -162,6 +191,11 @@ fn spi_value_to_db(v: SpiSqlValue) -> db::Value {
         SpiSqlValue::Real(r) => db::Value::Real(r),
         SpiSqlValue::Text(s) => db::Value::Text(s),
         SpiSqlValue::Blob(b) => db::Value::Blob(b),
+        SpiSqlValue::WitValue(p) => db::Value::WitValue(db::WitValuePayload {
+            type_id: wit_type_id_to_db(p.type_id),
+            bytes: p.bytes,
+            symbolic_name: p.symbolic_name,
+        }),
     }
 }
 
@@ -745,6 +779,27 @@ impl BundlesGuest for SqliteLib {
     fn bundle_touch(_id: u64) {
         // touch is fire-and-forget; nothing to record in the stub
     }
+
+    // ── @1.0.0 bundle-alias SPI (host-spi.wit additions) ──
+    // Aliases are a cas-cache registry concern; the browser stub has
+    // no store to bind them in, so each returns the same SQLITE_PERM
+    // sentinel as every other bundles method.
+    fn bundle_add_alias(
+        _bundle_id: u64,
+        _alias: String,
+    ) -> Result<(), SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
+
+    fn bundle_remove_alias(_alias: String) -> Result<bool, SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
+
+    fn bundle_aliases(
+        _bundle_id: u64,
+    ) -> Result<Vec<String>, SpiSqliteError> {
+        Err(bundles_perm_err())
+    }
 }
 
 // =========================================================================
@@ -942,6 +997,12 @@ fn db_to_hl_value(v: db::Value) -> HlValue {
         db::Value::Real(r) => HlValue::Real(r),
         db::Value::Text(s) => HlValue::Text(s),
         db::Value::Blob(b) => HlValue::Blob(b),
+        // The high-level surface (sqlink:wasm/high-level) has no
+        // wit-value arm — its value variant predates @1.0.0. At this
+        // boundary the typed record flattens to a BLOB carrying the
+        // canonical-CBOR bytes, matching the documented SQLite
+        // column-store behavior in `db::Value`'s contract.
+        db::Value::WitValue(p) => HlValue::Blob(p.bytes),
     }
 }
 
@@ -1436,12 +1497,18 @@ mod host_scalars {
     /// which wit-bindgen treats as a distinct type from the
     /// export-side one even though the WIT shape is the same.
     fn db_to_imp_value(v: db::Value) -> ImpSqlValue {
+        use bindings::sqlite::extension::types::WitValuePayload as ImpWitValuePayload;
         match v {
             db::Value::Null => ImpSqlValue::Null,
             db::Value::Integer(i) => ImpSqlValue::Integer(i),
             db::Value::Real(r) => ImpSqlValue::Real(r),
             db::Value::Text(s) => ImpSqlValue::Text(s),
             db::Value::Blob(b) => ImpSqlValue::Blob(b),
+            db::Value::WitValue(p) => ImpSqlValue::WitValue(ImpWitValuePayload {
+                type_id: super::db_payload_to_wit_type_id(p.type_id),
+                bytes: p.bytes,
+                symbolic_name: p.symbolic_name,
+            }),
         }
     }
 
@@ -1452,6 +1519,11 @@ mod host_scalars {
             ImpSqlValue::Real(r) => db::Value::Real(r),
             ImpSqlValue::Text(s) => db::Value::Text(s),
             ImpSqlValue::Blob(b) => db::Value::Blob(b),
+            ImpSqlValue::WitValue(p) => db::Value::WitValue(db::WitValuePayload {
+                type_id: super::wit_type_id_to_db(p.type_id),
+                bytes: p.bytes,
+                symbolic_name: p.symbolic_name,
+            }),
         }
     }
 

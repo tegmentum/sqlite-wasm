@@ -1,4 +1,4 @@
-package sqlite:extension@0.1.0;
+package sqlite:extension@1.0.0;
 
 /// Pluggable CLI dot commands. Extensions register dot-command
 /// handlers that the CLI dispatches alongside any built-ins. The

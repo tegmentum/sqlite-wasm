@@ -32,7 +32,7 @@ package sqlink:wasm@0.1.0;
 /// On `.unload`, the JS host calls `unregister-extension(ext-name)`
 /// and sqlite-lib drops every trampoline keyed under that ext-name.
 interface dispatch-bridge {
-    use sqlite:extension/types@0.1.0.{sqlite-error, sql-value, query-result};
+    use sqlite:extension/types@1.0.0.{sqlite-error, sql-value, query-result};
 
     /// Bridged `sqlite:extension/spi.execute`. Cli-family extensions
     /// loaded outside the composed binary (e.g. JS-side runtime-bindgen
@@ -264,7 +264,7 @@ interface dispatch-bridge {
 /// `Cache::with_bundles_conn` path; browser polyfill — soon to
 /// be deleted — used to drive it from JS).
 interface dispatch-bridge-cas {
-    use sqlite:extension/types@0.1.0.{sqlite-error, sql-value, query-result};
+    use sqlite:extension/types@1.0.0.{sqlite-error, sql-value, query-result};
 
     /// Bridged execute against sqlite-lib's CAS-cache connection.
     /// Native host: `~/.cache/sqlink/cas.db`. Composed binary

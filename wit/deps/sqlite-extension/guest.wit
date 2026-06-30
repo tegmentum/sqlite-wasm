@@ -1,4 +1,4 @@
-package sqlite:extension@0.1.0;
+package sqlite:extension@1.0.0;
 
 /// Declarative extension manifest. The host calls `describe()` once
 /// after instantiation and registers everything the manifest names
@@ -10,6 +10,34 @@ package sqlite:extension@0.1.0;
 interface metadata {
     use types.{function-flags};
     use policy.{capability};
+
+    /// Per-record decoder/encoder binding (new in @1.0.0). Each entry
+    /// tells the host how to (de)serialize one WIT record type
+    /// ferried through the `sql-value::wit-value` arm. Codegen emits
+    /// one entry per record-typed shape the extension marshals; the
+    /// host registers them into its per-extension typed-value
+    /// registry at extension-init time.
+    ///
+    /// PLAN-wit-value-extension.md (#491) Phase A.
+    record typed-value-binding {
+        /// 32-byte sha256 `canon:wit` shape hash. Matches
+        /// `wit-value-payload.type-id`; the authoritative lookup key
+        /// the host uses when ferrying record values.
+        type-id: list<u8>,
+        /// Human-readable name. Matches
+        /// `wit-value-payload.symbolic-name`. Diagnostic-only.
+        /// Example:
+        ///   "mobilitydb:wasm/temporal-types@0.1.0/tfloat-sequence"
+        symbolic-name: string,
+        /// Wasm-side import the host invokes to deserialize the
+        /// payload's `bytes` into the WIT record. Convention:
+        ///   "<package>:wasm/serde-ops/<type-name>-from-canon-cbor"
+        decoder-import: string,
+        /// Wasm-side import the host invokes to encode the WIT
+        /// record back into canonical-CBOR bytes. Convention:
+        ///   "<package>:wasm/serde-ops/<type-name>-to-canon-cbor"
+        encoder-import: string,
+    }
 
     /// One scalar SQL function declared by the extension.
     record scalar-function-spec {
@@ -189,6 +217,17 @@ interface metadata {
         /// expansion, not on the short prefix  the prefix is a
         /// per-database alias for the expansion.
         prefix-expansion: option<string>,
+        /// NEW IN @1.0.0: per-record decoder/encoder bindings for
+        /// the `sql-value::wit-value` arm. Empty list = this
+        /// extension does NOT ferry typed records (only the legacy
+        /// scalar arms of sql-value are exchanged). Codegen for
+        /// record-aware shims (PLAN-wit-value-extension.md Phase C)
+        /// emits one entry per record type the bridge marshals.
+        ///
+        /// The host registers these into its per-extension typed-
+        /// value registry at extension-init time; per-call lookup is
+        /// a hash-table hit keyed by `wit-value-payload.type-id`.
+        typed-values: list<typed-value-binding>,
     }
 
     /// Return the extension's full manifest. Called once by the host

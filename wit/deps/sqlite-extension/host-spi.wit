@@ -1,4 +1,4 @@
-package sqlite:extension@0.1.0;
+package sqlite:extension@1.0.0;
 
 /// Top-level SQL execution. Host imports for extensions that need to
 /// run SQL against the embedding database.
@@ -915,6 +915,25 @@ interface bundles {
     /// on every `.bundle show` / launch-flag resolve so LRU GC
     /// reflects actual use.
     bundle-touch: func(id: u64);
+
+    /// Bind an additional short name to an existing bundle. The
+    /// underlying `bundle-id` doesn't change  the new alias just
+    /// becomes another way to reach the same row through
+    /// `bundle-find-by-name`. Idempotent if `alias` already points
+    /// at `bundle-id`; errors with the alias-conflict shape if it
+    /// points at a different bundle.
+    bundle-add-alias: func(
+        bundle-id: u64,
+        alias: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Remove one short alias. The bundle itself is left intact
+    /// other aliases (and id / set_hash lookups) continue to
+    /// reach the row. Returns `false` if the alias didn't exist.
+    bundle-remove-alias: func(alias: string) -> result<bool, sqlite-error>;
+
+    /// All aliases bound to `bundle-id`, lexicographically.
+    bundle-aliases: func(bundle-id: u64) -> result<list<string>, sqlite-error>;
 }
 
 /// `sqlite3_session_*` API surfaced as named handles. Per

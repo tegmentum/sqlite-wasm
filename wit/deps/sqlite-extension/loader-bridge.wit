@@ -1,4 +1,4 @@
-package sqlite:extension@0.1.0;
+package sqlite:extension@1.0.0;
 
 /// loader-bridge  the small, tightly-scoped slice of the host's
 /// extension-loader surface that dot-command extensions are
@@ -95,4 +95,45 @@ interface loader-bridge {
     /// the launch-flag lookup at exec time matches exactly. The
     /// host computes this from `std::env::consts` (arch + os).
     host-target-triple: func() -> string;
+
+    /// Look up a process-environment variable from the host.
+    /// Returns `none` if unset or empty. Capability-gated on the
+    /// existing Spi capability (no new capability needed
+    /// operator already trusts the extension with cas-cache +
+    /// bundle reads via the bridge). Used by `bundle-cli` to honor
+    /// `$SQLINK_DEV_ROOT` when resolving the crate-root for
+    /// `.bundle build`, so an installed sqlink can be pointed at
+    /// the user's source checkout without recompiling bundle-cli.
+    env-var: func(name: string) -> option<string>;
+
+    /// PLAN-followups.md P1 live-prefer: after `prefix-cli` writes
+    /// an `INSERT OR REPLACE` row to `__sqlink_prefix_pin`,
+    /// re-register the bare-name SQLite trampoline against the
+    /// pinned extension's implementation so the dispatch change
+    /// takes effect in the CURRENT session  no restart needed.
+    ///
+    /// Resolution:
+    ///   1. Read `__sqlink_prefix_pin` for (function_name, n_args)
+    ///      to get the target expansion.
+    ///   2. Read `__sqlink_prefix_function` for (expansion,
+    ///      function_name, n_args) to get the owning extension_name.
+    ///   3. Re-call `register_host_loaded_scalar` on
+    ///      shared_spi_conn against that extension's func_id from
+    ///      `ext_scalar_func_ids`, overriding SQLite's last-wins
+    ///      registration.
+    ///
+    /// Errors via loader-error code:
+    ///   * 1: no pin row for (name, n_args)  caller likely
+    ///        skipped the INSERT.
+    ///   * 2: pin row's expansion has no matching entry in
+    ///        `__sqlink_prefix_function`  stale pin.
+    ///   * 3: extension's scalar isn't in `ext_scalar_func_ids`
+    ///        the extension hasn't registered the function yet,
+    ///        OR the pin targets a non-scalar shape
+    ///        (aggregates/collations/vtabs are not live-pinnable
+    ///        in v1).
+    apply-prefix-pin: func(
+        function-name: string,
+        n-args: s32,
+    ) -> result<_, loader-error>;
 }

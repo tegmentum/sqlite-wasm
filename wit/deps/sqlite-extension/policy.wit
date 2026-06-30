@@ -1,4 +1,4 @@
-package sqlite:extension@0.1.0;
+package sqlite:extension@1.0.0;
 
 /// Per-host-interface capability identifiers. An extension declares
 /// which of these it uses via `manifest.declared-capabilities`; the
