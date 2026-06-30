@@ -48,4 +48,4 @@ once_cell = "1"
 # (`tvm_copy_to_default`, `tvm_copy_from_default`, ...). The
 # `tvm-mm-link` step at sqlite-lib build time satisfies the
 # `tvm_mm.*` imports the helpers emit.
-tvm-guest-mm-rt = { path = "../../tvm-wasm/crates/tvm-guest-mm-rt" }
+tvm-guest-mm-rt = { git = "https://github.com/tegmentum/tvm-wasm.git", rev = "6f3bae38fad4addd4de1837ab151f4ac871d1dd4" }
