@@ -26,7 +26,7 @@ submodule.
 
 | Path | Source |
 |---|---|
-| `sqlite-loader-wit/` | The WIT contract every extension speaks. Pinned via submodule; lives at https://github.com/tegmentum/sqlite-loader-wit. |
+| `sqlite-wit/` | The WIT contract every extension speaks. Pinned via submodule; lives at https://github.com/tegmentum/sqlite-wit. |
 
 ## Build
 
