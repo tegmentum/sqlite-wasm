@@ -1,6 +1,8 @@
 target/
 host/target/
 extensions/_shared-target/
+build/
+.compose/
 Cargo.lock
 __pycache__/
 .cargo/config.toml
