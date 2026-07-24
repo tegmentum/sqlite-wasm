@@ -1,4 +1,4 @@
-package sqlink:wasm@0.1.0;
+package sqlite:wasm@0.1.0;
 
 /// Minimal world used by the wasmtime-side reference host
 /// (sqlink-host crate) for `wasmtime::component::bindgen!`.

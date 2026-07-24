@@ -1,4 +1,4 @@
-package sqlink:wasm@0.1.0;
+package sqlite:wasm@0.1.0;
 
 /// Per-extension dispatch slots. Each interface has the same shape as
 /// `sqlite:extension/metadata.describe` + `sqlite:extension/scalar-function.call`
@@ -7,7 +7,7 @@ package sqlink:wasm@0.1.0;
 ///
 /// Conceptually the canonical contract is `sqlite:extension/*`; the
 /// slot interfaces here are a per-host adaptation that lives in
-/// `sqlink:wasm` because that's what the composer disambiguates by.
+/// `sqlite:wasm` because that's what the composer disambiguates by.
 
 interface fts5-slot {
     use sqlite:extension/types@0.1.0.{sql-value};

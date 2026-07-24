@@ -288,7 +288,7 @@ interface extension-loader {
     /// Run a wasm component targeting the `runnable` world: a
     /// compose-dynlink-shaped wasm component that resolves shared
     /// providers via the `linker` and exports
-    /// `sqlink:wasm/run.run() -> result<string, string>`. Returns
+    /// `sqlite:wasm/run.run() -> result<string, string>`. Returns
     /// the component's output string for the cli to print.
     /// See PLAN-compose-integration.md.
     run-wasm: func(

@@ -1,4 +1,4 @@
-package sqlink:wasm@0.1.0;
+package sqlite:wasm@0.1.0;
 
 /// Utilities the `sqlite-library` world exposes alongside the
 /// SPI and high-level surfaces. Captures helpers that don't fit
@@ -13,7 +13,7 @@ package sqlink:wasm@0.1.0;
 /// of `sqlite:extension/policy.load-options` and
 /// `sqlite:extension/metadata.manifest` rather than `use`-imported
 /// from those interfaces. Sharing the canonical types triggered
-/// "interface `sqlink:wasm/library@0.1.0` transitively depends on
+/// "interface `sqlite:wasm/library@0.1.0` transitively depends on
 /// an interface in incompatible ways" — wit-bindgen distinguishes
 /// types reachable via imports from types reachable via exports
 /// when the same WIT type sits on both sides of the world boundary.

@@ -1,4 +1,4 @@
-package sqlink:wasm@0.1.0;
+package sqlite:wasm@0.1.0;
 
 /// Minimum interface every runnable wasm component exports — a
 /// single `run() -> result<string, string>` entry point the host

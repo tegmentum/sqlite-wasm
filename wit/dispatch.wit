@@ -1,4 +1,4 @@
-package sqlink:wasm@0.1.0;
+package sqlite:wasm@0.1.0;
 
 /// Cross-component dispatch for dynamically-loaded extensions.
 ///

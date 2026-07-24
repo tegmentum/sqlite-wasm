@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::bindings::exports::sqlink::wasm::low_level::{ColumnType, ResultCode};
+use crate::bindings::exports::sqlite::wasm::low_level::{ColumnType, ResultCode};
 use crate::db::{self, Value};
 
 pub struct StmtState {
