@@ -34,6 +34,31 @@ pub use sqlite_component_core::db;
 mod state;
 
 use std::cell::RefCell;
+use std::sync::OnceLock;
+
+// The wasm-native VFS (`wasivfs`) is linked into sqlite-lib.wasm's C
+// source, but the Rust side never calls `sqlite3_wasivfs_register`
+// unless we do it here. Standalone sqlite-wasm CLIs register it in
+// their `main`; a library component doesn't have that entry point.
+// Without this, `Connection::open(<path>, DEFAULT)` (used by SPI's
+// `open_db`, `HighLevelGuest::open_file`, low-level `open`, etc.)
+// fails with `no such vfs: wasivfs` — because `core::db::open` on
+// wasm32 hands the vfs name "wasivfs" to sqlite3_open_v2 for every
+// non-`:memory:` path.
+//
+// `OnceLock<Result<(), db::Error>>` lets every DB-open path call
+// `ensure_wasivfs()?` cheaply — the underlying register runs exactly
+// once. `db::Error` is `Clone`, so the cached result is returnable
+// from every caller without contortions.
+//
+// In-memory opens don't strictly need wasivfs, but calling
+// `ensure_wasivfs()` for them is free after the first call and keeps
+// the code paths uniform.
+static WASIVFS_INIT: OnceLock<Result<(), db::Error>> = OnceLock::new();
+
+fn ensure_wasivfs() -> Result<(), db::Error> {
+    WASIVFS_INIT.get_or_init(db::init_wasivfs).clone()
+}
 
 use bindings::exports::sqlite::extension::config::Guest as ConfigGuest;
 use bindings::exports::sqlite::extension::logging::{Guest as LoggingGuest, LogLevel};
@@ -147,6 +172,12 @@ thread_local! {
 }
 
 fn shared_conn() -> std::rc::Rc<RefCell<db::Connection>> {
+    // wasivfs isn't strictly needed for `:memory:`, but init here too
+    // so callers that later swap the shared conn to a file (via
+    // spi.open_db) don't hit the missing-VFS error on first use.
+    // Failure to init is fatal to the process anyway (SQLite has no
+    // recovery from a broken VFS registration).
+    let _ = ensure_wasivfs();
     SHARED_CONN.with(|c| {
         let mut g = c.borrow_mut();
         if g.is_none() {
@@ -268,6 +299,7 @@ impl SpiGuest for SqliteLib {
         dst_path: String,
         dst_db: String,
     ) -> Result<(), SpiSqliteError> {
+        ensure_wasivfs().map_err(spi_db_err)?;
         let dst = db::Connection::open(&dst_path, db::OpenFlags::DEFAULT)
             .map_err(spi_db_err)?;
         spi_with(|src| src.backup_into(&src_db, &dst, &dst_db).map_err(spi_db_err))
@@ -278,6 +310,7 @@ impl SpiGuest for SqliteLib {
         src_db: String,
         dst_db: String,
     ) -> Result<(), SpiSqliteError> {
+        ensure_wasivfs().map_err(spi_db_err)?;
         let src = db::Connection::open(&src_path, db::OpenFlags::READONLY)
             .map_err(spi_db_err)?;
         spi_with(|dst| src.backup_into(&src_db, dst, &dst_db).map_err(spi_db_err))
@@ -353,7 +386,10 @@ impl SpiGuest for SqliteLib {
 
     fn open_db(path: String) -> Result<(), SpiSqliteError> {
         // Swap the shared SPI connection. Empty path / `:memory:` opens
-        // a fresh in-memory db; anything else is a file path.
+        // a fresh in-memory db; anything else is a file path — which
+        // requires wasivfs to be registered (see comment on
+        // WASIVFS_INIT).
+        ensure_wasivfs().map_err(spi_db_err)?;
         let new_conn = if path.is_empty() || path == ":memory:" {
             db::Connection::open_in_memory().map_err(spi_db_err)?
         } else {
@@ -403,6 +439,9 @@ fn ll_map_err(e: &db::Error) -> ResultCode {
 
 impl LowLevelGuest for SqliteLib {
     fn open(filename: String, flags: OpenFlags) -> Result<DbHandle, ResultCode> {
+        if let Err(e) = ensure_wasivfs() {
+            return Err(ll_map_err(&e));
+        }
         let path = if filename.is_empty() || filename == ":memory:" {
             ":memory:".to_string()
         } else {
@@ -571,12 +610,14 @@ impl HighLevelGuest for SqliteLib {
     fn version() -> String { db::version() }
     fn version_number() -> i32 { db::version_number() }
     fn open_memory() -> Result<Connection, HlDatabaseError> {
+        ensure_wasivfs().map_err(|e| hl_err(&e))?;
         match db::Connection::open_in_memory() {
             Ok(c) => Ok(Connection::new(HlConnection { conn: std::rc::Rc::new(RefCell::new(c)) })),
             Err(e) => Err(hl_err(&e)),
         }
     }
     fn open_file(path: String) -> Result<Connection, HlDatabaseError> {
+        ensure_wasivfs().map_err(|e| hl_err(&e))?;
         match db::Connection::open(&path, db::OpenFlags::DEFAULT) {
             Ok(c) => Ok(Connection::new(HlConnection { conn: std::rc::Rc::new(RefCell::new(c)) })),
             Err(e) => Err(hl_err(&e)),
@@ -592,6 +633,11 @@ impl HighLevelGuest for SqliteLib {
 
 impl GuestConnection for HlConnection {
     fn new(path: String, mode: OpenMode) -> Self {
+        // Best-effort; the constructor has no `Result` return channel,
+        // so we fall through to open_in_memory() on failure the same
+        // way we do for a failed open. If wasivfs registration fails
+        // the memory-fallback open will still work.
+        let _ = ensure_wasivfs();
         let conn = match mode {
             OpenMode::Memory => db::Connection::open_in_memory(),
             OpenMode::ReadOnly => db::Connection::open(&path, db::OpenFlags::READONLY),
