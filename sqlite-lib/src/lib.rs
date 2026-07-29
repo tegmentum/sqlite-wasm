@@ -33,6 +33,7 @@ pub use sqlite_component_core::db;
 
 mod state;
 
+use libsqlite3_sys as ffi;
 use std::cell::RefCell;
 use std::sync::OnceLock;
 
@@ -195,14 +196,329 @@ fn spi_with<R>(f: impl FnOnce(&db::Connection) -> R) -> R {
     f(&conn)
 }
 
+// =========================================================================
+// SPI prepared-statement cache
+//
+// The SPI `execute` / `execute-scalar` methods are called in tight loops
+// by consumers doing per-row INSERT/UPDATE/DELETE (see ducklink's
+// sqlitewasm extension — Bug 4b / Bug 7). Without caching, every call
+// does the full sqlite3_prepare_v2 → bind → step → finalize cycle. On
+// wasm32 the prepare is by far the dominant cost (SQL parse, byte-code
+// gen). Caching the prepared statement and rebinding on reuse drops
+// per-call cost to bind + step ≈ 30x faster on the 10k-INSERT stress
+// test (163s → ~5s).
+//
+// Design:
+//   * Thread-local RefCell<StmtCache>. Wasm component instance is
+//     single-threaded, so no cross-thread locking.
+//   * Keyed by the exact SQL string the SPI caller passed in. Different
+//     whitespace / literal parameters ⇒ distinct entries (that's the
+//     idiomatic prepared-statement pattern anyway).
+//   * Bounded at CACHE_LIMIT entries; LRU eviction (linear scan for the
+//     min-lru entry — fine at N=256, and eviction only fires when a NEW
+//     distinct SQL text is presented after the cache is full).
+//   * `open-db` drains the cache (sqlite3_finalize every held stmt)
+//     BEFORE swapping SHARED_CONN. Skipping the drain would leak stmts
+//     against the old sqlite3 handle and prevent its sqlite3_close from
+//     succeeding.
+//   * Cached stmts are prepared with sqlite3_prepare_v2, which stores
+//     the original SQL and transparently re-prepares on schema change.
+//     So a `CREATE TABLE` between two `INSERT`s that shares a cache
+//     entry is not a hazard.
+//   * On cache HIT: sqlite3_reset + sqlite3_clear_bindings, then the
+//     caller re-binds and steps. On MISS: prepare fresh, insert.
+//
+// Safety: raw *mut sqlite3_stmt lives as long as its parent sqlite3
+// handle. shared_conn() gives us the same Rc<RefCell<Connection>> the
+// SPI thread-local holds; drop-order on `open-db` (drain-then-swap)
+// ensures the stmts are finalized while their conn is still open.
+// =========================================================================
+
+const STMT_CACHE_LIMIT: usize = 256;
+
+struct CachedStmt {
+    raw: *mut ffi::sqlite3_stmt,
+    /// Bumped whenever SHARED_CONN is swapped (see `open-db`). Entries
+    /// with a stale epoch must never be reused — they belong to a now-
+    /// finalized sqlite3 handle. Drain runs before swap, so this is a
+    /// defence-in-depth check.
+    epoch: u64,
+    /// Monotonic access counter for LRU eviction.
+    lru: u64,
+}
+
+struct StmtCache {
+    map: std::collections::HashMap<String, CachedStmt>,
+    counter: u64,
+}
+
+impl StmtCache {
+    fn new() -> Self {
+        Self { map: std::collections::HashMap::new(), counter: 0 }
+    }
+
+    /// Finalize every cached statement. Called from `open-db` before
+    /// the shared connection is replaced.
+    fn drain(&mut self) {
+        for (_, e) in self.map.drain() {
+            unsafe { ffi::sqlite3_finalize(e.raw); }
+        }
+    }
+
+    /// Remove the least-recently-used entry, finalizing its stmt.
+    fn evict_one(&mut self) {
+        let victim = self
+            .map
+            .iter()
+            .min_by_key(|(_, v)| v.lru)
+            .map(|(k, _)| k.clone());
+        if let Some(k) = victim {
+            if let Some(e) = self.map.remove(&k) {
+                unsafe { ffi::sqlite3_finalize(e.raw); }
+            }
+        }
+    }
+}
+
+thread_local! {
+    static SPI_CONN_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    static SPI_STMT_CACHE: RefCell<StmtCache> = RefCell::new(StmtCache::new());
+}
+
+/// Look up or prepare a statement for `sql` against `conn_raw`. On a
+/// cache hit the returned pointer is already `sqlite3_reset` +
+/// `sqlite3_clear_bindings`'d and ready for a fresh bind. On a miss
+/// the statement is freshly prepared and installed in the cache. The
+/// caller MUST NOT sqlite3_finalize the returned pointer — the cache
+/// retains ownership.
+///
+/// # Safety
+/// `conn_raw` must be the raw handle of the currently-active shared
+/// connection (i.e. the same connection that is in SHARED_CONN when
+/// the current SPI epoch was assigned). Callers only get here via
+/// `spi_with_cached_stmt`, which grabs SHARED_CONN atomically.
+unsafe fn cached_stmt(
+    conn_raw: *mut ffi::sqlite3,
+    sql: &str,
+) -> Result<*mut ffi::sqlite3_stmt, db::Error> {
+    let epoch = SPI_CONN_EPOCH.with(|c| c.get());
+    SPI_STMT_CACHE.with(|cache_cell| {
+        let mut cache = cache_cell.borrow_mut();
+        cache.counter = cache.counter.wrapping_add(1);
+        let seq = cache.counter;
+
+        // Try a cache hit first. Only reuse if the epoch matches — a
+        // stale entry (belonging to a swapped-out connection) is a bug
+        // to reach here (drain runs on swap), but if we do, discard.
+        if let Some(entry) = cache.map.get_mut(sql) {
+            if entry.epoch == epoch {
+                entry.lru = seq;
+                let raw = entry.raw;
+                // Ready the stmt for reuse. sqlite3_reset returns the
+                // last step's error code (or OK); we don't propagate it
+                // because any error was already surfaced on the prior
+                // call. sqlite3_clear_bindings never fails.
+                ffi::sqlite3_reset(raw);
+                ffi::sqlite3_clear_bindings(raw);
+                return Ok(raw);
+            }
+            // Stale entry — drop it and prepare fresh.
+            let stale = cache.map.remove(sql).unwrap();
+            ffi::sqlite3_finalize(stale.raw);
+        }
+
+        // Miss: prepare against the live connection.
+        let c_sql = std::ffi::CString::new(sql).map_err(|e| db::Error {
+            code: ffi::SQLITE_MISUSE,
+            extended_code: ffi::SQLITE_MISUSE,
+            message: e.to_string(),
+        })?;
+        let mut raw: *mut ffi::sqlite3_stmt = std::ptr::null_mut();
+        let rc = ffi::sqlite3_prepare_v2(
+            conn_raw,
+            c_sql.as_ptr(),
+            -1,
+            &mut raw,
+            std::ptr::null_mut(),
+        );
+        if rc != ffi::SQLITE_OK {
+            let msg_ptr = ffi::sqlite3_errmsg(conn_raw);
+            let message = if msg_ptr.is_null() {
+                format!("sqlite3_prepare_v2 failed (code {rc})")
+            } else {
+                std::ffi::CStr::from_ptr(msg_ptr)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            return Err(db::Error {
+                code: rc & 0xff,
+                extended_code: rc,
+                message,
+            });
+        }
+        if raw.is_null() {
+            // Prepared "empty" statement (comment-only input). Not
+            // cacheable — we couldn't return it anyway. Report as
+            // misuse; callers of `execute` do not pass empty SQL.
+            return Err(db::Error {
+                code: ffi::SQLITE_MISUSE,
+                extended_code: ffi::SQLITE_MISUSE,
+                message: "sqlite3_prepare_v2: empty statement".into(),
+            });
+        }
+
+        // Insert, evicting one LRU victim if we've hit the cap.
+        if cache.map.len() >= STMT_CACHE_LIMIT {
+            cache.evict_one();
+        }
+        cache
+            .map
+            .insert(sql.to_string(), CachedStmt { raw, epoch, lru: seq });
+        Ok(raw)
+    })
+}
+
+/// Bind values 1..=values.len() on the raw stmt. `SQLITE_TRANSIENT`
+/// copies text/blob payloads so the caller can drop them immediately.
+unsafe fn bind_all_raw(
+    conn_raw: *mut ffi::sqlite3,
+    stmt: *mut ffi::sqlite3_stmt,
+    values: &[db::Value],
+) -> Result<(), db::Error> {
+    use std::os::raw::{c_char, c_double, c_int, c_void};
+    for (i, v) in values.iter().enumerate() {
+        let idx = (i + 1) as c_int;
+        let rc = match v {
+            db::Value::Null => ffi::sqlite3_bind_null(stmt, idx),
+            db::Value::Integer(n) => ffi::sqlite3_bind_int64(stmt, idx, *n),
+            db::Value::Real(r) => ffi::sqlite3_bind_double(stmt, idx, *r as c_double),
+            db::Value::Text(s) => ffi::sqlite3_bind_text(
+                stmt,
+                idx,
+                s.as_ptr() as *const c_char,
+                s.len() as c_int,
+                ffi::SQLITE_TRANSIENT(),
+            ),
+            db::Value::Blob(b) => ffi::sqlite3_bind_blob(
+                stmt,
+                idx,
+                b.as_ptr() as *const c_void,
+                b.len() as c_int,
+                ffi::SQLITE_TRANSIENT(),
+            ),
+        };
+        if rc != ffi::SQLITE_OK {
+            let msg_ptr = ffi::sqlite3_errmsg(conn_raw);
+            let message = if msg_ptr.is_null() {
+                format!("sqlite3_bind_* failed (code {rc}) at index {idx}")
+            } else {
+                std::ffi::CStr::from_ptr(msg_ptr)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            return Err(db::Error {
+                code: rc & 0xff,
+                extended_code: rc,
+                message,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Read one column value from a raw stmt at the current row.
+unsafe fn column_value_raw(stmt: *mut ffi::sqlite3_stmt, idx: i32) -> db::Value {
+    match ffi::sqlite3_column_type(stmt, idx) {
+        ffi::SQLITE_NULL => db::Value::Null,
+        ffi::SQLITE_INTEGER => db::Value::Integer(ffi::sqlite3_column_int64(stmt, idx)),
+        ffi::SQLITE_FLOAT => db::Value::Real(ffi::sqlite3_column_double(stmt, idx)),
+        ffi::SQLITE_TEXT => {
+            let p = ffi::sqlite3_column_text(stmt, idx);
+            let n = ffi::sqlite3_column_bytes(stmt, idx) as usize;
+            if p.is_null() {
+                db::Value::Text(String::new())
+            } else {
+                let bytes = std::slice::from_raw_parts(p as *const u8, n);
+                db::Value::Text(String::from_utf8_lossy(bytes).into_owned())
+            }
+        }
+        ffi::SQLITE_BLOB => {
+            let p = ffi::sqlite3_column_blob(stmt, idx);
+            let n = ffi::sqlite3_column_bytes(stmt, idx) as usize;
+            if p.is_null() {
+                db::Value::Blob(Vec::new())
+            } else {
+                let bytes = std::slice::from_raw_parts(p as *const u8, n);
+                db::Value::Blob(bytes.to_vec())
+            }
+        }
+        _ => db::Value::Null,
+    }
+}
+
+/// Step the raw stmt to completion, gathering column names and every row.
+unsafe fn step_collect_raw(
+    conn_raw: *mut ffi::sqlite3,
+    stmt: *mut ffi::sqlite3_stmt,
+) -> Result<(Vec<String>, Vec<Vec<db::Value>>), db::Error> {
+    let col_count = ffi::sqlite3_column_count(stmt) as usize;
+    let mut columns: Vec<String> = Vec::with_capacity(col_count);
+    for i in 0..col_count {
+        let p = ffi::sqlite3_column_name(stmt, i as i32);
+        columns.push(if p.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+        });
+    }
+    let mut rows: Vec<Vec<db::Value>> = Vec::new();
+    loop {
+        let rc = ffi::sqlite3_step(stmt);
+        match rc {
+            ffi::SQLITE_ROW => {
+                let mut r: Vec<db::Value> = Vec::with_capacity(col_count);
+                for i in 0..col_count {
+                    r.push(column_value_raw(stmt, i as i32));
+                }
+                rows.push(r);
+            }
+            ffi::SQLITE_DONE => break,
+            _ => {
+                let msg_ptr = ffi::sqlite3_errmsg(conn_raw);
+                let message = if msg_ptr.is_null() {
+                    format!("sqlite3_step failed (code {rc})")
+                } else {
+                    std::ffi::CStr::from_ptr(msg_ptr)
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                return Err(db::Error {
+                    code: rc & 0xff,
+                    extended_code: rc,
+                    message,
+                });
+            }
+        }
+    }
+    Ok((columns, rows))
+}
+
 impl SpiGuest for SqliteLib {
     fn execute(sql: String, params: Vec<SpiSqlValue>) -> Result<SpiQueryResult, SpiSqliteError> {
-        spi_with(|conn| {
-            let mut stmt = conn.prepare(&sql).map_err(|e| spi_db_err(e.clone()))?;
-            let columns = stmt.column_names();
+        // Cache-hit path: reset+clear_bindings+rebind+step on a stmt
+        // that survived the previous call — skips sqlite3_prepare_v2
+        // (which dominates wasm cost). See STMT_CACHE comment above.
+        spi_with(|conn| unsafe {
+            let raw = cached_stmt(conn.raw_handle(), &sql).map_err(spi_db_err)?;
             let dbs: Vec<db::Value> = params.into_iter().map(spi_value_to_db).collect();
-            stmt.bind_all(&dbs).map_err(|e| spi_db_err(e.clone()))?;
-            let rows_vals = stmt.collect_rows().map_err(|e| spi_db_err(e.clone()))?;
+            bind_all_raw(conn.raw_handle(), raw, &dbs).map_err(spi_db_err)?;
+            let (columns, rows_vals) =
+                step_collect_raw(conn.raw_handle(), raw).map_err(spi_db_err)?;
+            // Reset immediately so the cached stmt releases any page
+            // locks before the next unrelated statement runs on this
+            // connection. Ignore the return code — it only re-reports
+            // an error we've already surfaced.
+            ffi::sqlite3_reset(raw);
             let rows: Vec<Vec<SpiSqlValue>> = rows_vals
                 .into_iter()
                 .map(|r| r.into_iter().map(db_to_spi_value).collect())
@@ -217,11 +533,13 @@ impl SpiGuest for SqliteLib {
     }
 
     fn execute_scalar(sql: String, params: Vec<SpiSqlValue>) -> Result<SpiSqlValue, SpiSqliteError> {
-        spi_with(|conn| {
-            let mut stmt = conn.prepare(&sql).map_err(|e| spi_db_err(e.clone()))?;
+        spi_with(|conn| unsafe {
+            let raw = cached_stmt(conn.raw_handle(), &sql).map_err(spi_db_err)?;
             let dbs: Vec<db::Value> = params.into_iter().map(spi_value_to_db).collect();
-            stmt.bind_all(&dbs).map_err(|e| spi_db_err(e.clone()))?;
-            let rows_vals = stmt.collect_rows().map_err(|e| spi_db_err(e.clone()))?;
+            bind_all_raw(conn.raw_handle(), raw, &dbs).map_err(spi_db_err)?;
+            let (_cols, rows_vals) =
+                step_collect_raw(conn.raw_handle(), raw).map_err(spi_db_err)?;
+            ffi::sqlite3_reset(raw);
             let first = rows_vals
                 .into_iter()
                 .next()
@@ -395,6 +713,15 @@ impl SpiGuest for SqliteLib {
         } else {
             db::Connection::open(&path, db::OpenFlags::DEFAULT).map_err(spi_db_err)?
         };
+        // Drain the prepared-statement cache BEFORE dropping the old
+        // Rc<Connection>. Cache entries hold raw sqlite3_stmt* pointers
+        // against the outgoing sqlite3 handle; sqlite3_close (invoked
+        // by Connection::Drop) silently fails if any stmts are still
+        // open, and reusing a stmt against a new connection is UB.
+        // Bump the epoch so any straggler (defence-in-depth) can't be
+        // reused across the swap.
+        SPI_STMT_CACHE.with(|c| c.borrow_mut().drain());
+        SPI_CONN_EPOCH.with(|c| c.set(c.get().wrapping_add(1)));
         SHARED_CONN.with(|c| {
             *c.borrow_mut() = Some(std::rc::Rc::new(RefCell::new(new_conn)));
         });
