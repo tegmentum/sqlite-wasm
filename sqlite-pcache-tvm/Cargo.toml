@@ -16,6 +16,15 @@ already correct from this commit, so backend swap is contained.
 """
 license = "MIT"
 
+[features]
+# Force the in-process (HashMap-backed) region on wasm32 as well as
+# native. Used by the browser flavor of sqlite-lib so the resulting
+# cdylib has exactly one linear memory and can be transpiled by jco
+# (which doesn't yet support multi-memory inner core modules).
+# Default off  multi-memory is still the preferred wasm32 build for
+# the native wasmtime runtime where pool capacity matters.
+single-memory = []
+
 [dependencies]
 # Same libsqlite3-sys version core/cli use. NOT bundled  the
 # bundled compile lives in core, and cargo's `links =`
@@ -25,8 +34,10 @@ libsqlite3-sys = { version = "0.38", default-features = false }
 # core is what brings in the bundled sqlite3 build; transitively
 # linking it satisfies our extern symbols.
 sqlite-component-core = { path = "../core" }
-# Pull the guest-side tvm:memory imports from the shared
-# bindings crate. Inlining the wit_bindgen::generate! here
-# would produce a duplicate `encoded world` custom section in
-# the final wasm  see sqlite-tvm-bindings/src/lib.rs.
-sqlite-tvm-bindings = { path = "../sqlite-tvm-bindings" }
+# Guest-side multi-memory substrate. Replaces the legacy
+# wit-bindgen-backed `tvm:memory` interface; cold pages live in
+# a non-default wasm memory pool, accessed via dispatch helpers
+# (`tvm_load_*`, `tvm_copy_to_default`, ...). The `tvm-mm-link`
+# static-linker step at sqlite-lib build time satisfies the
+# `tvm_mm.*` imports the helpers emit.
+tvm-guest-mm-rt = { git = "https://github.com/tegmentum/tvm-wasm.git", rev = "6f3bae38fad4addd4de1837ab151f4ac871d1dd4" }

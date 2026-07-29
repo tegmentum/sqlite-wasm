@@ -1,21 +1,21 @@
 //! Custom `sqlite3_vfs` implementation. Phase 4 of the TVM track
 //! in PLAN-tvm-integration.md.
 //!
-//! ## Layered plan
+//! ## Backend selection
 //!
-//! 1. **Phase 4.0 (this code):** trampolines + in-process
-//!    `Vec<u8>` storage + `install()` registering via
-//!    `sqlite3_vfs_register`. Registration is NOT
-//!    boot-order-constrained the way `sqlite3_config(...)` is,
-//!    so this can run at any point before the first
-//!    `sqlite3_open_v2` against our VFS name.
+//! Native builds use `storage::InProcStorage` (a `Vec<u8>` per
+//! file) so trampoline behavior is unit-testable without a wasm
+//! runtime. wasm32 builds use
+//! `multi_memory_storage::MultiMemoryStorage`: file bytes live
+//! in pool 2 of the `tvm-guest-mm` shell, accessed through the
+//! `tvm-guest-mm-rt` dispatch helpers. The `tvm-mm-link` step
+//! at sqlite-lib build time bakes the pool memories into the
+//! merged module.
 //!
-//! 2. **Phase 4.1 (deferred):** wit-bindgen-backed
-//!    `WitTvmStorage` plugging into the same `FileStorage`
-//!    trait. Gated on `target_arch = "wasm32"` +
-//!    `feature = "tvm"`, same shape as `sqlite-pcache-tvm`'s
-//!    `WitTvmRegion`. SQLite-facing trampolines don't change;
-//!    only the backend swap.
+//! Registration is NOT boot-order-constrained the way
+//! `sqlite3_config(...)` is, so `install()` / `install_as_default()`
+//! can run at any point before the first `sqlite3_open_v2`
+//! against our VFS name.
 //!
 //! ## Lifetime model
 //!
@@ -56,12 +56,24 @@ use parking_lot::Mutex;
 
 pub mod storage;
 
-// On wasm32 the file storage is always the wit-bindgen-backed
-// `tvm:memory` region  there's no reason to pick the in-proc
-// fallback when the target is wasm. The in-proc backend stays
-// available on native for the unit-test path.
-#[cfg(target_arch = "wasm32")]
-pub mod wit_tvm_storage;
+/// `"opfs"` VFS — file bytes live in the JS host's OPFS via the
+/// WIT-imported `sqlite:wasm/opfs-host` interface. Backend lives in
+/// sqlite-lib (which holds the wit-bindgen import shims); this
+/// crate just registers the VFS table and trampolines into a
+/// dyn-trait callback. Native sqlite-lib supplies a stub backend
+/// so the VFS still registers, returning SQLITE_CANTOPEN on use.
+pub mod opfs;
+
+// On wasm32 the file storage is normally a multi-memory pool-backed
+// storage: file bytes live in pool 2 of the `tvm-guest-mm`
+// shell, accessed through the `tvm-guest-mm-rt` dispatch
+// helpers. The in-proc Vec<u8> backend stays the default on
+// native (where the pool helpers don't exist) for the
+// unit-test path. The `single-memory` feature forces the in-proc
+// backend even on wasm32; this is the browser flavor where jco
+// can't yet transpile multi-memory inner modules.
+#[cfg(all(target_arch = "wasm32", not(feature = "single-memory")))]
+pub mod multi_memory_storage;
 
 use storage::FileStorage;
 
@@ -69,14 +81,14 @@ use storage::FileStorage;
 /// TVM-backed variant fails to create its region; the InProc
 /// variant is infallible. Trampoline maps the error to
 /// SQLITE_IOERR.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "single-memory"))]
 fn make_storage() -> Result<Box<dyn FileStorage>, c_int> {
     Ok(Box::new(storage::InProcStorage::new()))
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "single-memory")))]
 fn make_storage() -> Result<Box<dyn FileStorage>, c_int> {
-    match wit_tvm_storage::WitTvmStorage::new() {
+    match multi_memory_storage::MultiMemoryStorage::new() {
         Ok(s) => Ok(Box::new(s)),
         Err(_) => Err(ffi::SQLITE_IOERR),
     }
@@ -107,12 +119,100 @@ static FILES: Lazy<Mutex<FileTable>> = Lazy::new(|| Mutex::new(HashMap::new()));
 /// SQLite calls xOpen with a NULL filename.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Reserved name prefix for ephemeral in-memory databases
+/// synthesized by `core::db::open_in_memory` when routing through
+/// `tvm-mem`. Used by `xOpen` to recognise main-db opens that
+/// own auxiliary files (`-journal` / `-wal` / `-shm`) and by
+/// `io_close` to sweep those auxiliaries when the owner closes.
+const TVM_ANON_PREFIX: &str = "/__tvm_mem_anon_";
+
+/// Suffixes SQLite appends to a main db's filename to derive the
+/// auxiliary file names (rollback journal, WAL, shared-memory).
+/// We never carry delete-on-close for these — auxiliaries follow
+/// the main db's lifecycle, which is enforced by the prefix
+/// sweep in `io_close`.
+const AUX_SUFFIXES: &[&str] = &["-journal", "-wal", "-shm"];
+
 /// Per-file state we own. The outer `sqlite3_file` SQLite
 /// allocates is just the `pMethods` pointer + our inner ptr.
 struct TvmFileInner {
     storage: Arc<Mutex<Box<dyn FileStorage>>>,
     name: String,
     delete_on_close: bool,
+    /// True for `-journal` / `-wal` / `-shm` files attached to
+    /// an owning main db. Used to suppress the prefix-sweep in
+    /// `io_close` so the auxiliary's close doesn't try to walk
+    /// the FILES table looking for further children.
+    is_auxiliary: bool,
+    /// Current SQLite lock level for this open file. Tracks the
+    /// state SQLite expects across `xLock` / `xUnlock` calls
+    /// (`SQLITE_LOCK_NONE` through `SQLITE_LOCK_EXCLUSIVE`).
+    ///
+    /// We're single-process / single-threaded inside the wasm
+    /// guest so contention is impossible — but SQLite still
+    /// asserts consistent transitions (e.g. SHARED before
+    /// RESERVED, RESERVED before EXCLUSIVE), and WAL mode in
+    /// particular probes the level via `xCheckReservedLock` +
+    /// `SQLITE_FCNTL_LOCKSTATE`. Track it locally so those
+    /// probes report something coherent.
+    lock_level: c_int,
+    /// Shared-memory state for `-shm` opens, allocated lazily on
+    /// the first `xShmMap` call. None for non-shm files. SQLite
+    /// uses this for the WAL index; see the `ShmState` struct
+    /// below for the per-file region + lock bookkeeping.
+    shm: Option<Box<ShmState>>,
+}
+
+/// Per-file shared-memory state used by SQLite's WAL index.
+///
+/// SQLite's WAL implementation maps the `-shm` file in fixed-size
+/// regions (32 KiB by default) and uses 8 lock slots
+/// (`SQLITE_SHM_NLOCK`) for coordination. Single-process means
+/// the lock counts are bookkeeping only — there is nothing to
+/// contend with — but SQLite asserts consistent transitions, so
+/// we track them.
+///
+/// Lifetimes: each `Box<[u8]>` region is owned by the file's
+/// `ShmState`; the pointer we hand back via `xShmMap` is valid
+/// for the lifetime of that owning Box. SQLite documents that
+/// region pointers stay live until the matching `xShmUnmap`, and
+/// `xShmUnmap` runs only at file close, so a file's
+/// `ShmState.regions` Vec must not be reallocated in-place across
+/// xShmMap calls. Since `Box<[u8]>` is heap-allocated and the
+/// inner bytes don't move when the Vec grows, this contract is
+/// satisfied.
+struct ShmState {
+    /// Region index → owned byte buffer. Sparse: entries may be
+    /// `None` if SQLite asked about a region without extending
+    /// it. Region size is the `pgsz` SQLite passes on the first
+    /// successful `xShmMap` for that region (uniform per file).
+    regions: Vec<Option<Box<[u8]>>>,
+    /// Per-slot lock state. Single-process makes contention
+    /// impossible; we still track for SQLite's transition
+    /// assertions.
+    locks: [ShmLockState; 8],
+}
+
+/// State of one of SQLite's 8 shm-lock slots.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum ShmLockState {
+    /// No lock held.
+    Unlocked,
+    /// Shared lock held by `count` openers. Single-process is
+    /// always 1 in practice; the field exists to satisfy any
+    /// future code that nests shared locks.
+    Shared(u32),
+    /// Exclusive lock held.
+    Exclusive,
+}
+
+impl ShmState {
+    fn new() -> Self {
+        Self {
+            regions: Vec::new(),
+            locks: [ShmLockState::Unlocked; 8],
+        }
+    }
 }
 
 /// `#[repr(C)]` so the `base` field is at offset 0 — SQLite
@@ -136,7 +236,21 @@ unsafe extern "C" fn io_close(file: *mut sqlite3_file) -> c_int {
         // SAFETY: inner_ptr came from `Box::into_raw` in io_open.
         let inner = Box::from_raw(inner_ptr);
         if inner.delete_on_close {
-            FILES.lock().remove(&inner.name);
+            let mut files = FILES.lock();
+            files.remove(&inner.name);
+            // If this was a main db file with the anon prefix, sweep
+            // any auxiliary files (journal/wal/shm) that share the
+            // base name. SQLite opens/closes auxiliaries multiple
+            // times across the main db's lifetime, so we keep them
+            // around until the owner closes; doing the sweep here
+            // matches the comment in `vfs_open` ("aux files should
+            // share the main db's lifecycle") without the bug of
+            // freeing them on every cycle (which leaked one slice of
+            // pool 2 per close/reopen).
+            if inner.name.starts_with(TVM_ANON_PREFIX) && !inner.is_auxiliary {
+                let prefix = format!("{}-", inner.name);
+                files.retain(|k, _| !k.starts_with(&prefix));
+            }
         }
         // dropped here
         (*tf).inner = ptr::null_mut();
@@ -216,12 +330,35 @@ unsafe extern "C" fn io_file_size(
     ffi::SQLITE_OK
 }
 
-unsafe extern "C" fn io_lock(_file: *mut sqlite3_file, _level: c_int) -> c_int {
-    // Single-process; locking is moot.
+unsafe extern "C" fn io_lock(file: *mut sqlite3_file, level: c_int) -> c_int {
+    // Single-process / single-threaded inside the wasm guest, so
+    // no other connection can be holding a competing lock.
+    // SQLite still asserts consistent transitions — `xLock` is
+    // documented as monotonic (it never decreases the level), and
+    // WAL probes the level via SQLITE_FCNTL_LOCKSTATE — so track
+    // the value per-file.
+    let tf = file as *mut TvmFile;
+    if tf.is_null() || (*tf).inner.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    let inner = &mut *(*tf).inner;
+    if level > inner.lock_level {
+        inner.lock_level = level;
+    }
     ffi::SQLITE_OK
 }
 
-unsafe extern "C" fn io_unlock(_file: *mut sqlite3_file, _level: c_int) -> c_int {
+unsafe extern "C" fn io_unlock(file: *mut sqlite3_file, level: c_int) -> c_int {
+    // Monotonic in the other direction: xUnlock never increases
+    // the level. Drop to the requested level.
+    let tf = file as *mut TvmFile;
+    if tf.is_null() || (*tf).inner.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    let inner = &mut *(*tf).inner;
+    if level < inner.lock_level {
+        inner.lock_level = level;
+    }
     ffi::SQLITE_OK
 }
 
@@ -229,6 +366,10 @@ unsafe extern "C" fn io_check_reserved_lock(
     _file: *mut sqlite3_file,
     p_res_out: *mut c_int,
 ) -> c_int {
+    // Single-process — nobody else can possibly hold RESERVED on
+    // this file, so always report 0. SQLite uses this to decide
+    // whether to escalate from SHARED to EXCLUSIVE during a
+    // commit; 0 says "go ahead."
     if !p_res_out.is_null() {
         *p_res_out = 0;
     }
@@ -236,12 +377,22 @@ unsafe extern "C" fn io_check_reserved_lock(
 }
 
 unsafe extern "C" fn io_file_control(
-    _file: *mut sqlite3_file,
-    _op: c_int,
-    _arg: *mut c_void,
+    file: *mut sqlite3_file,
+    op: c_int,
+    arg: *mut c_void,
 ) -> c_int {
-    // SQLite uses xFileControl to ask for VFS-specific extensions
-    // (pragmas, file-control commands). We don't expose any.
+    // Honor SQLITE_FCNTL_LOCKSTATE so callers (including SQLite's
+    // own diagnostic paths) can read the current lock level. Any
+    // other file-control is unsupported on this VFS.
+    if op == ffi::SQLITE_FCNTL_LOCKSTATE {
+        let tf = file as *mut TvmFile;
+        if tf.is_null() || (*tf).inner.is_null() || arg.is_null() {
+            return ffi::SQLITE_IOERR;
+        }
+        let inner = &*(*tf).inner;
+        *(arg as *mut c_int) = inner.lock_level;
+        return ffi::SQLITE_OK;
+    }
     ffi::SQLITE_NOTFOUND
 }
 
@@ -259,12 +410,184 @@ unsafe extern "C" fn io_device_characteristics(_file: *mut sqlite3_file) -> c_in
     ffi::SQLITE_IOCAP_ATOMIC | ffi::SQLITE_IOCAP_SAFE_APPEND | ffi::SQLITE_IOCAP_SEQUENTIAL
 }
 
+// ---------------------------------------------------------------
+// Shared-memory IO methods (xShm*) — back the WAL index.
+// ---------------------------------------------------------------
+
+unsafe extern "C" fn io_shm_map(
+    file: *mut sqlite3_file,
+    region_idx: c_int,
+    region_size: c_int,
+    extend: c_int,
+    pp_out: *mut *mut c_void,
+) -> c_int {
+    // SQLite asks "give me a pointer to region N, size region_size,
+    // creating it if `extend` is true." Allocate (or look up) a
+    // heap-owned Box<[u8]> per region. The pointer we hand back is
+    // stable for the file's lifetime because:
+    //   - `regions` is a Vec<Option<Box<[u8]>>>; growing the Vec
+    //     reallocates the outer storage of the Vec, NOT the
+    //     heap-owned Box payloads. The bytes the pointer addresses
+    //     stay put.
+    //   - Boxes are freed only at xShmUnmap (i.e. at file close).
+    if pp_out.is_null() || file.is_null() || region_idx < 0 || region_size <= 0 {
+        return ffi::SQLITE_IOERR;
+    }
+    *pp_out = ptr::null_mut();
+
+    let tf = file as *mut TvmFile;
+    if (*tf).inner.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    let inner = &mut *(*tf).inner;
+    let shm = inner.shm.get_or_insert_with(|| Box::new(ShmState::new()));
+    let idx = region_idx as usize;
+
+    // Grow the regions Vec sparsely (None) up to and including idx.
+    if idx >= shm.regions.len() {
+        shm.regions.resize_with(idx + 1, || None);
+    }
+
+    if shm.regions[idx].is_some() {
+        // SAFETY: just confirmed Some. Hand back the address of
+        // the boxed slice's payload bytes.
+        let r = shm.regions[idx].as_mut().unwrap();
+        *pp_out = r.as_mut_ptr() as *mut c_void;
+        return ffi::SQLITE_OK;
+    }
+
+    if extend == 0 {
+        // SQLite asked "does this region exist already?" and the
+        // answer is no. Returning SQLITE_OK with a NULL pointer
+        // is the documented signal — SQLite then knows the region
+        // doesn't exist yet without us synthesizing one.
+        return ffi::SQLITE_OK;
+    }
+
+    let bytes = vec![0u8; region_size as usize].into_boxed_slice();
+    shm.regions[idx] = Some(bytes);
+    *pp_out = shm.regions[idx].as_mut().unwrap().as_mut_ptr() as *mut c_void;
+    ffi::SQLITE_OK
+}
+
+unsafe extern "C" fn io_shm_lock(
+    file: *mut sqlite3_file,
+    offset: c_int,
+    n: c_int,
+    flags: c_int,
+) -> c_int {
+    // SQLite uses 8 lock slots (SQLITE_SHM_NLOCK) on the shm file.
+    // `offset` is the starting slot, `n` the count. `flags` is a
+    // bitmask: (LOCK | UNLOCK) × (SHARED | EXCLUSIVE).
+    //
+    // Single-process means no real contention is possible. We
+    // still track per-slot state so SQLite's invariants check out:
+    // a SHARED lock can stack on SHARED but not on EXCLUSIVE;
+    // EXCLUSIVE requires UNLOCKED.
+    if file.is_null() || offset < 0 || n <= 0 || offset + n > 8 {
+        return ffi::SQLITE_IOERR;
+    }
+    let tf = file as *mut TvmFile;
+    if (*tf).inner.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    let inner = &mut *(*tf).inner;
+    let shm = inner.shm.get_or_insert_with(|| Box::new(ShmState::new()));
+
+    let is_lock = (flags & ffi::SQLITE_SHM_LOCK) != 0;
+    let is_unlock = (flags & ffi::SQLITE_SHM_UNLOCK) != 0;
+    let is_shared = (flags & ffi::SQLITE_SHM_SHARED) != 0;
+    let is_exclusive = (flags & ffi::SQLITE_SHM_EXCLUSIVE) != 0;
+
+    if is_lock == is_unlock {
+        // Exactly one of LOCK / UNLOCK must be set.
+        return ffi::SQLITE_IOERR;
+    }
+    if is_shared == is_exclusive {
+        // Exactly one of SHARED / EXCLUSIVE must be set.
+        return ffi::SQLITE_IOERR;
+    }
+
+    let start = offset as usize;
+    let end = (offset + n) as usize;
+
+    if is_lock {
+        // Two-pass: validate first, then mutate. SQLite expects
+        // an all-or-nothing lock acquisition (any slot in the
+        // range busy → return SQLITE_BUSY without partial state).
+        for i in start..end {
+            match (is_exclusive, shm.locks[i]) {
+                (true, ShmLockState::Unlocked) => {}
+                (false, ShmLockState::Unlocked | ShmLockState::Shared(_)) => {}
+                _ => return ffi::SQLITE_BUSY,
+            }
+        }
+        for i in start..end {
+            shm.locks[i] = if is_exclusive {
+                ShmLockState::Exclusive
+            } else {
+                match shm.locks[i] {
+                    ShmLockState::Unlocked => ShmLockState::Shared(1),
+                    ShmLockState::Shared(c) => ShmLockState::Shared(c + 1),
+                    ShmLockState::Exclusive => unreachable!(),
+                }
+            };
+        }
+    } else {
+        // UNLOCK. Drop exclusive → unlocked, or decrement shared
+        // (last shared holder → unlocked). Releasing an already
+        // unlocked slot is documented as a no-op (SQLite uses
+        // unlock-on-shutdown without prior knowledge of state).
+        for i in start..end {
+            shm.locks[i] = match shm.locks[i] {
+                ShmLockState::Exclusive => ShmLockState::Unlocked,
+                ShmLockState::Shared(1) | ShmLockState::Shared(0) => ShmLockState::Unlocked,
+                ShmLockState::Shared(c) => ShmLockState::Shared(c - 1),
+                ShmLockState::Unlocked => ShmLockState::Unlocked,
+            };
+        }
+    }
+    ffi::SQLITE_OK
+}
+
+unsafe extern "C" fn io_shm_barrier(_file: *mut sqlite3_file) {
+    // Memory-ordering fence. Single-threaded inside the wasm guest
+    // makes this strictly cosmetic, but SeqCst documents intent
+    // and is free at the wasm-runtime level.
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+unsafe extern "C" fn io_shm_unmap(file: *mut sqlite3_file, _delete_flag: c_int) -> c_int {
+    // Drop all shm regions for this file. SQLite calls this exactly
+    // once per file at close (the wal-index's owning open). The
+    // `delete_flag` distinguishes "remove the underlying shm file"
+    // from "release this open's mapping" — we have no persistent
+    // shm file (it lives in-process memory), so both reduce to
+    // dropping the regions Vec.
+    if file.is_null() {
+        return ffi::SQLITE_IOERR;
+    }
+    let tf = file as *mut TvmFile;
+    if (*tf).inner.is_null() {
+        return ffi::SQLITE_OK;
+    }
+    let inner = &mut *(*tf).inner;
+    inner.shm = None;
+    ffi::SQLITE_OK
+}
+
 #[repr(transparent)]
 struct IoMethods(sqlite3_io_methods);
 unsafe impl Sync for IoMethods {}
 
 static IO_METHODS: IoMethods = IoMethods(sqlite3_io_methods {
-    iVersion: 1,
+    // iVersion=2 turns on the xShm* family that SQLite needs to
+    // set up the wal-index when a connection enters WAL journal
+    // mode. The xFetch / xUnfetch (mmap) fields stay None — we
+    // don't expose mmap-backed I/O — but iVersion=2 only requires
+    // the shm slots to be valid; iVersion=3 is the floor for
+    // requiring xFetch / xUnfetch to be set.
+    iVersion: 2,
     xClose: Some(io_close),
     xRead: Some(io_read),
     xWrite: Some(io_write),
@@ -277,14 +600,14 @@ static IO_METHODS: IoMethods = IoMethods(sqlite3_io_methods {
     xFileControl: Some(io_file_control),
     xSectorSize: Some(io_sector_size),
     xDeviceCharacteristics: Some(io_device_characteristics),
-    // iVersion=1 stops here  the v2/v3 fields (xShmMap,
-    // xFetch, etc.) require iVersion bumps and we don't
-    // expose them. SQLite tolerates the iVersion=1 shape for
-    // non-WAL, non-mmap modes.
-    xShmMap: None,
-    xShmLock: None,
-    xShmBarrier: None,
-    xShmUnmap: None,
+    xShmMap: Some(io_shm_map),
+    xShmLock: Some(io_shm_lock),
+    xShmBarrier: Some(io_shm_barrier),
+    xShmUnmap: Some(io_shm_unmap),
+    // xFetch / xUnfetch are mmap I/O, gated on iVersion=3. We
+    // don't support memory-mapped pages (everything routes
+    // through xRead / xWrite) so these stay None and we cap at
+    // iVersion=2.
     xFetch: None,
     xUnfetch: None,
 });
@@ -306,30 +629,44 @@ unsafe extern "C" fn vfs_open(
     // NULL filename = SQLite wants a temp file. Synthesize a
     // unique name + flag for delete-on-close so we don't
     // accumulate temps. Named opens also get delete-on-close
-    // when the caller passes SQLITE_OPEN_DELETEONCLOSE  used
+    // when the caller passes SQLITE_OPEN_DELETEONCLOSE — used
     // by core::db::open_in_memory to get an ephemeral tvm-mem
     // db that cleans itself up when the connection drops.
     //
-    // Files under the path prefix `/__tvm_mem_anon_` are also
-    // auto-delete  the prefix is reserved for
-    // `core::db::open_in_memory`'s synthetic names, and SQLite's
-    // rollback journal / WAL files attached to such a db end up
-    // at `/__tvm_mem_anon_N-journal` (or `-wal`, `-shm`) which
-    // don't carry SQLITE_OPEN_DELETEONCLOSE on their opens but
-    // should share the main db's lifecycle. Without this, the
-    // auxiliary files leak in FILES across in-mem db opens.
+    // Files under the path prefix `/__tvm_mem_anon_` that do
+    // NOT end in `-journal` / `-wal` / `-shm` are main-db opens
+    // for `core::db::open_in_memory`'s synthetic names; we
+    // force delete-on-close so the slice gets dropped when the
+    // db connection closes. The auxiliary files for such a db
+    // (`/__tvm_mem_anon_N-journal` etc.) share the main db's
+    // lifecycle, but SQLite opens/closes them many times during
+    // normal pager activity — so we mark them `is_auxiliary`
+    // (not delete-on-close) and let the main db's `io_close`
+    // sweep them via the prefix walk in FILES.
     let explicit_delete = (flags & ffi::SQLITE_OPEN_DELETEONCLOSE) != 0;
-    const TVM_ANON_PREFIX: &str = "/__tvm_mem_anon_";
-    let (name, delete_on_close) = if z_name.is_null() {
+    let (name, delete_on_close, is_auxiliary) = if z_name.is_null() {
         let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        (format!("__tvm_tmp_{n}"), true)
+        (format!("__tvm_tmp_{n}"), true, false)
     } else {
         let s = match CStr::from_ptr(z_name as *const c_char).to_str() {
             Ok(s) => s.to_string(),
             Err(_) => return ffi::SQLITE_IOERR,
         };
-        let anon = s.starts_with(TVM_ANON_PREFIX);
-        (s, explicit_delete || anon)
+        let anon_main = s.starts_with(TVM_ANON_PREFIX)
+            && !AUX_SUFFIXES.iter().any(|suf| s.ends_with(suf));
+        let aux = s.starts_with(TVM_ANON_PREFIX)
+            && AUX_SUFFIXES.iter().any(|suf| s.ends_with(suf));
+        // Main-db opens with the anon prefix get delete-on-close so
+        // a dropped in-memory db cleans up its slice + its
+        // auxiliaries (handled by the prefix sweep in `io_close`).
+        // Auxiliary files (`-journal` / `-wal` / `-shm`) do NOT
+        // carry delete-on-close from the prefix alone — SQLite
+        // opens/closes auxiliaries multiple times during normal
+        // operation, and each "close" used to free the FILES entry,
+        // forcing the next open to allocate a fresh pool-2 slice
+        // (leaking 256 MiB per cycle until the pool's max_pages
+        // ceiling traps the third write).
+        (s, explicit_delete || anon_main, aux)
     };
 
     let storage = {
@@ -356,6 +693,9 @@ unsafe extern "C" fn vfs_open(
         storage,
         name,
         delete_on_close,
+        is_auxiliary,
+        lock_level: ffi::SQLITE_LOCK_NONE,
+        shm: None,
     }));
 
     // Initialize the sqlite3_file slab. SAFETY: SQLite passes us

@@ -1,10 +1,17 @@
-package sqlite:extension@0.1.0;
+package sqlite:extension@1.0.0;
 
 /// Shared types used across every interface in this package. Pulled
 /// in via `use types.{...}` from any other interface that needs them.
 interface types {
     /// Unified SQL value representation. Used for function arguments,
     /// function results, parameter binding, and row data.
+    ///
+    /// New in @1.0.0: the `wit-value` arm carries a canonical-CBOR-
+    /// encoded WIT record alongside an identifying hash + symbolic
+    /// name. Record-typed shim functions (PLAN-wit-value-extension.md)
+    /// ferry their args/returns through this arm; hosts decode via
+    /// the wasm-side decoder/encoder imports listed in
+    /// `metadata.manifest.typed-values`.
     variant sql-value {
         /// SQL NULL.
         null,
@@ -16,6 +23,35 @@ interface types {
         text(string),
         /// Binary blob.
         blob(list<u8>),
+        /// Canonical-CBOR-encoded WIT record (new in @1.0.0).
+        wit-value(wit-value-payload),
+    }
+
+    /// Payload for the `sql-value::wit-value` arm. Carries a
+    /// structurally-identified, canonical-CBOR-encoded WIT record
+    /// across the host/extension boundary.
+    ///
+    /// Wire format is canonical CBOR per the `canon:cbor` profile
+    /// (#486 substrate). Cross-language interoperable; the encoder
+    /// must produce a payload the decoder accepts regardless of
+    /// host language.
+    record wit-value-payload {
+        /// 32-byte sha256("witcanon:1" || canonical-CBOR(WIT record
+        /// shape)) computed via `canon:wit` normalization. The
+        /// authoritative match key  hosts look this up against
+        /// the per-extension `typed-value-binding` registry to find
+        /// the decoder/encoder imports.
+        type-id: list<u8>,
+        /// Canonical-CBOR encoding of the record per the `canon:cbor`
+        /// profile. Length matches the record shape identified by
+        /// `type-id`.
+        bytes: list<u8>,
+        /// Human-readable symbolic name + version, for diagnostics.
+        /// Example:
+        ///   "mobilitydb:wasm/temporal-types@0.1.0/tfloat-sequence"
+        /// Hosts use this in error messages but NOT for matching;
+        /// `type-id` is the authoritative key.
+        symbolic-name: string,
     }
 
     /// SQLite error carrying both primary and extended result codes.

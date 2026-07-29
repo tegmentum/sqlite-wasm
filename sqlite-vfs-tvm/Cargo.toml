@@ -21,6 +21,15 @@ That's the > 4 GiB story for non-page bytes.
 """
 license = "MIT"
 
+[features]
+# Force the in-process (Vec<u8>) storage on wasm32 as well as
+# native. Used by the browser flavor of sqlite-lib so the resulting
+# cdylib has exactly one linear memory and can be transpiled by jco
+# (which doesn't yet support multi-memory inner core modules).
+# Default off  multi-memory is still the preferred wasm32 build for
+# the native wasmtime runtime where pool capacity matters.
+single-memory = []
+
 [dependencies]
 # Same libsqlite3-sys version core/cli use. NOT bundled  the
 # bundled compile lives in core; cargo's `links =` uniqueness
@@ -34,8 +43,9 @@ sqlite-component-core = { path = "../core" }
 # parking_lot's Mutex is what core/host already pull in.
 parking_lot = "0.12"
 once_cell = "1"
-# Pull the guest-side tvm:memory imports from the shared
-# bindings crate. Inlining the wit_bindgen::generate! here
-# would produce a duplicate `encoded world` custom section in
-# the final wasm  see sqlite-tvm-bindings/src/lib.rs.
-sqlite-tvm-bindings = { path = "../sqlite-tvm-bindings" }
+# Guest-side multi-memory substrate. File bytes live in pool 2
+# of the `tvm-guest-mm` shell, accessed via dispatch helpers
+# (`tvm_copy_to_default`, `tvm_copy_from_default`, ...). The
+# `tvm-mm-link` step at sqlite-lib build time satisfies the
+# `tvm_mm.*` imports the helpers emit.
+tvm-guest-mm-rt = { git = "https://github.com/tegmentum/tvm-wasm.git", rev = "6f3bae38fad4addd4de1837ab151f4ac871d1dd4" }

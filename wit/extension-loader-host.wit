@@ -21,8 +21,8 @@ world extension-loader-host {
     /// world imports the same interfaces) can call them. The
     /// existing LoadedState impls satisfy the trait for
     /// extensions; HostWrap satisfies it for the cli.
-    import sqlite:extension/spi@0.1.0;
-    import sqlite:extension/spi-loader@0.1.0;
-    import sqlite:extension/prepared@0.1.0;
-    import sqlite:extension/session@0.1.0;
+    import sqlite:extension/spi@1.0.0;
+    import sqlite:extension/spi-loader@1.0.0;
+    import sqlite:extension/prepared@1.0.0;
+    import sqlite:extension/session@1.0.0;
 }

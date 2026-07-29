@@ -48,6 +48,18 @@ fn vfs_is_registered(name: &str) -> bool {
 /// SQL value — mirrors rusqlite's `types::Value`. Owned variants
 /// only (no borrowed columns); cli copies row data out before
 /// the next `step()` invalidates the column pointers.
+///
+/// New in @1.0.0: the `WitValue` arm mirrors the WIT contract's
+/// `sql-value::wit-value` variant. It carries a canonical-CBOR
+/// encoded WIT record plus the 32-byte `type-id` shape hash and
+/// the human-readable symbolic name. The SQLite C surface has no
+/// equivalent — at SQL bind / column / result boundaries the
+/// payload's `bytes` round-trip as `BLOB` (the type-id + symbolic
+/// name don't survive a SQLite column store, by design). The
+/// variant carries its full identity through every other layer
+/// (host marshaling, cas-cache snapshots, SPI conversion) so the
+/// wasm-to-wasm path can encode/decode without the SQL layer
+/// flattening the typed record into an opaque blob.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
@@ -55,6 +67,27 @@ pub enum Value {
     Real(f64),
     Text(String),
     Blob(Vec<u8>),
+    /// Canonical-CBOR-encoded WIT record (PLAN-wit-value-extension.md
+    /// Phase B). Mirrors the WIT `sql-value::wit-value(wit-value-
+    /// payload)` arm.
+    WitValue(WitValuePayload),
+}
+
+/// Mirror of the WIT `wit-value-payload` record. Carries the
+/// authoritative match key (`type_id`), the canonical-CBOR bytes,
+/// and a diagnostic symbolic name.
+///
+/// `type_id` is fixed at 32 bytes (sha256 of the `canon:wit`
+/// normalized record shape per `canon:wit` Tier 2 — see
+/// PLAN-wit-value-extension.md DD2). The WIT-bindings type carries
+/// a `list<u8>` for flexibility; the host validates / pads to 32
+/// bytes on the boundary so internal code can rely on a fixed-size
+/// array.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WitValuePayload {
+    pub type_id: [u8; 32],
+    pub bytes: Vec<u8>,
+    pub symbolic_name: String,
 }
 
 /// Error returned by every fallible db.rs operation. Carries the
@@ -620,6 +653,31 @@ impl Connection {
         Ok(s)
     }
 
+    /// `sqlite3_db_filename(db_name)`. Returns the on-disk filename
+    /// SQLite opened the named database against (typically "main",
+    /// "temp", or an ATTACH alias). Empty string for in-memory or
+    /// temp databases. None if `db_name` is not attached.
+    ///
+    /// Used by the wal-frames host SPI dispatcher to locate the
+    /// `<db_path>-wal` sidecar on disk without an extra round-trip
+    /// through SQL (a `SELECT file FROM pragma_database_list` would
+    /// work but adds prepared-statement churn for what is one
+    /// `const char *` C call).
+    pub fn db_filename(&self, db_name: &str) -> Result<Option<String>, Error> {
+        let db_c = CString::new(db_name)
+            .map_err(|e| standalone_error(ffi::SQLITE_MISUSE, e.to_string()))?;
+        // SAFETY: sqlite3_db_filename returns a pointer owned by
+        // SQLite (NUL-terminated, valid for the connection's life)
+        // or NULL if the named db is not attached. We do not free.
+        let p = unsafe { ffi::sqlite3_db_filename(self.raw, db_c.as_ptr()) };
+        if p.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: per the docs above; valid NUL-terminated string.
+        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        Ok(Some(s))
+    }
+
     /// `sqlite3_serialize` against this connection. Returns a
     /// copy of `db_name`'s contents (default schema is "main")
     /// as a Vec<u8>. Used by the cli's `.serialize` dot command
@@ -878,6 +936,18 @@ impl Statement<'_> {
                     b.len() as c_int,
                     ffi::SQLITE_TRANSIENT(),
                 ),
+                // SQLite has no first-class typed-record cell; bind
+                // the canonical-CBOR bytes as BLOB. type-id +
+                // symbolic-name don't survive the SQL-layer flatten
+                // (by design — the typed identity is recovered on
+                // the wasm side via the per-extension registry).
+                Value::WitValue(p) => ffi::sqlite3_bind_blob(
+                    self.raw,
+                    index,
+                    p.bytes.as_ptr() as *const c_void,
+                    p.bytes.len() as c_int,
+                    ffi::SQLITE_TRANSIENT(),
+                ),
             }
         };
         if rc != ffi::SQLITE_OK {
@@ -894,6 +964,50 @@ impl Statement<'_> {
             self.bind((i + 1) as i32, v)?;
         }
         Ok(())
+    }
+
+    /// Zero-copy blob bind: hand sqlite3 a borrowed `&[u8]` without
+    /// first stuffing it into `Value::Blob(Vec<u8>)`. Uses
+    /// SQLITE_TRANSIENT (sqlite copies internally before step
+    /// returns), so the borrow only needs to outlive this call.
+    /// Useful in hot paths where the caller already holds the bytes
+    /// in a Vec/Box/slice and would otherwise pay a `to_vec()`.
+    pub fn bind_blob_ref(&mut self, index: i32, bytes: &[u8]) -> Result<(), Error> {
+        let rc = unsafe {
+            ffi::sqlite3_bind_blob(
+                self.raw,
+                index,
+                bytes.as_ptr() as *const c_void,
+                bytes.len() as c_int,
+                ffi::SQLITE_TRANSIENT(),
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            let db = unsafe { ffi::sqlite3_db_handle(self.raw) };
+            Err(unsafe { last_error(db) })
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Zero-copy text bind, sibling of `bind_blob_ref`. Uses
+    /// SQLITE_TRANSIENT for the same reason.
+    pub fn bind_text_ref(&mut self, index: i32, text: &str) -> Result<(), Error> {
+        let rc = unsafe {
+            ffi::sqlite3_bind_text(
+                self.raw,
+                index,
+                text.as_ptr() as *const c_char,
+                text.len() as c_int,
+                ffi::SQLITE_TRANSIENT(),
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            let db = unsafe { ffi::sqlite3_db_handle(self.raw) };
+            Err(unsafe { last_error(db) })
+        } else {
+            Ok(())
+        }
     }
 
     /// Number of result columns. 0 for non-SELECT statements.
@@ -1113,6 +1227,15 @@ unsafe fn set_result_value(ctx: *mut ffi::sqlite3_context, v: &Value) {
             ctx,
             b.as_ptr() as *const c_void,
             b.len() as c_int,
+            ffi::SQLITE_TRANSIENT(),
+        ),
+        // SQLite has no typed-record cell; surface the canonical-
+        // CBOR bytes as BLOB. The wasm bridge round-trips the typed
+        // identity via the per-extension typed-value registry.
+        Value::WitValue(p) => ffi::sqlite3_result_blob(
+            ctx,
+            p.bytes.as_ptr() as *const c_void,
+            p.bytes.len() as c_int,
             ffi::SQLITE_TRANSIENT(),
         ),
     }
@@ -1745,6 +1868,57 @@ impl Connection {
             unsafe { drop(Box::from_raw(prev as *mut F)) };
         }
     }
+
+    /// Set the WAL hook. The callback fires AFTER a WAL commit has
+    /// just appended `n_frames` frames to the WAL for database
+    /// `db_name`. Return SQLITE_OK (0) for normal continuation or any
+    /// other SQLite result code to propagate as an error to the
+    /// calling SQL statement.
+    ///
+    /// SQLite allows only one wal-hook per connection; passing
+    /// `Some(...)` replaces the previous installation. `None` removes.
+    pub fn wal_hook<F>(&self, hook: Option<F>)
+    where
+        F: Fn(&str, i32) -> i32 + 'static,
+    {
+        unsafe extern "C" fn call_boxed<F>(
+            p_arg: *mut c_void,
+            _db: *mut ffi::sqlite3,
+            db_name: *const c_char,
+            n_frames: c_int,
+        ) -> c_int
+        where
+            F: Fn(&str, i32) -> i32,
+        {
+            let boxed = p_arg as *mut F;
+            if boxed.is_null() {
+                return 0;
+            }
+            let db_s = if db_name.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(db_name).to_string_lossy().into_owned()
+            };
+            (*boxed)(&db_s, n_frames)
+        }
+        let (cb, user_data) = match hook {
+            Some(f) => {
+                let boxed: *mut F = Box::into_raw(Box::new(f));
+                let cb: unsafe extern "C" fn(
+                    *mut c_void,
+                    *mut ffi::sqlite3,
+                    *const c_char,
+                    c_int,
+                ) -> c_int = call_boxed::<F>;
+                (Some(cb), boxed as *mut c_void)
+            }
+            None => (None, ptr::null_mut()),
+        };
+        let prev = unsafe { ffi::sqlite3_wal_hook(self.raw, cb, user_data) };
+        if !prev.is_null() {
+            unsafe { drop(Box::from_raw(prev as *mut F)) };
+        }
+    }
 }
 
 // ---------------------------------------------------------------
@@ -1927,6 +2101,33 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0][0], Value::Text("bob".into()));
         assert_eq!(rows[0][1], Value::Integer(25));
+    }
+
+    #[test]
+    fn bind_blob_ref_roundtrips_without_copy() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE blobs(id INTEGER, data BLOB)").unwrap();
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let mut ins = c.prepare("INSERT INTO blobs VALUES(?1, ?2)").unwrap();
+        ins.bind(1, &Value::Integer(7)).unwrap();
+        ins.bind_blob_ref(2, &bytes).unwrap();
+        matches!(ins.step().unwrap(), StepResult::Done);
+        let mut sel = c.prepare("SELECT data FROM blobs WHERE id = 7").unwrap();
+        matches!(sel.step().unwrap(), StepResult::Row);
+        assert_eq!(sel.column_value(0), Value::Blob(bytes));
+    }
+
+    #[test]
+    fn bind_text_ref_roundtrips() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE t(name TEXT)").unwrap();
+        let s = "hello \u{1f600}";
+        let mut ins = c.prepare("INSERT INTO t VALUES(?1)").unwrap();
+        ins.bind_text_ref(1, s).unwrap();
+        matches!(ins.step().unwrap(), StepResult::Done);
+        let mut sel = c.prepare("SELECT name FROM t").unwrap();
+        matches!(sel.step().unwrap(), StepResult::Row);
+        assert_eq!(sel.column_value(0), Value::Text(s.into()));
     }
 
     #[test]
@@ -2152,6 +2353,82 @@ mod tests {
         assert_eq!(g.len(), 2);
         assert_eq!(g[0].0, UpdateAction::Insert);
         assert_eq!(g[0].1, "t");
+    }
+
+    #[test]
+    fn wal_hook_install_only_in_memory() {
+        // Sanity: installing a wal_hook on an in-memory db (WAL not
+        // active) must not crash; the hook never fires but install
+        // itself goes through sqlite3_wal_hook(callback, user_data).
+        let c = Connection::open_in_memory().unwrap();
+        c.wal_hook(Some(|_db: &str, _n: i32| 0));
+        drop(c);
+    }
+
+    #[test]
+    fn wal_hook_fires_after_wal_commit() {
+        // WAL mode requires a file-backed db (sqlite refuses WAL for
+        // `:memory:`). Use a tempfile so the test stays hermetic.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "sqlink-wal-hook-test-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let cleanup = |p: &std::path::Path| {
+            let _ = std::fs::remove_file(p);
+            let _ = std::fs::remove_file(format!("{}-wal", p.display()));
+            let _ = std::fs::remove_file(format!("{}-shm", p.display()));
+            let _ = std::fs::remove_file(format!("{}-journal", p.display()));
+        };
+        cleanup(&path);
+
+        // Use a thread-local counter to dodge any Send/Sync subtleties
+        // around capturing a Rc<RefCell<...>> through the trampoline.
+        // The native libsqlite3-sys + system VFS run wal_hook on the
+        // same thread that called execute_batch, so a thread_local is
+        // safe here.
+        thread_local! {
+            static WAL_LOG: std::cell::RefCell<Vec<(String, i32)>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        WAL_LOG.with(|l| l.borrow_mut().clear());
+
+        {
+            let c = Connection::open(path.to_str().unwrap(), OpenFlags::DEFAULT)
+                .unwrap();
+            // Toggle WAL. Native libsqlite3-sys + system VFS support
+            // WAL; the in-WASM tvm-vfs does not (iVersion=1) so this
+            // test is native-only as a substrate proof.
+            c.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+
+            c.wal_hook(Some(|db_name: &str, n_frames: i32| -> i32 {
+                WAL_LOG.with(|l| {
+                    l.borrow_mut().push((db_name.to_string(), n_frames));
+                });
+                0 // SQLITE_OK
+            }));
+
+            c.execute_batch(
+                "CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3);",
+            )
+            .unwrap();
+        }
+
+        let captured: Vec<(String, i32)> =
+            WAL_LOG.with(|l| l.borrow().clone());
+        assert!(
+            !captured.is_empty(),
+            "wal_hook never fired despite WAL journal_mode + DDL/DML traffic"
+        );
+        for (db_name, n_frames) in captured.iter() {
+            assert_eq!(db_name, "main");
+            assert!(*n_frames >= 0);
+        }
+        cleanup(&path);
     }
 
     #[test]

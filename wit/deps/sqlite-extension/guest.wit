@@ -1,4 +1,4 @@
-package sqlite:extension@0.1.0;
+package sqlite:extension@1.0.0;
 
 /// Declarative extension manifest. The host calls `describe()` once
 /// after instantiation and registers everything the manifest names
@@ -10,6 +10,34 @@ package sqlite:extension@0.1.0;
 interface metadata {
     use types.{function-flags};
     use policy.{capability};
+
+    /// Per-record decoder/encoder binding (new in @1.0.0). Each entry
+    /// tells the host how to (de)serialize one WIT record type
+    /// ferried through the `sql-value::wit-value` arm. Codegen emits
+    /// one entry per record-typed shape the extension marshals; the
+    /// host registers them into its per-extension typed-value
+    /// registry at extension-init time.
+    ///
+    /// PLAN-wit-value-extension.md (#491) Phase A.
+    record typed-value-binding {
+        /// 32-byte sha256 `canon:wit` shape hash. Matches
+        /// `wit-value-payload.type-id`; the authoritative lookup key
+        /// the host uses when ferrying record values.
+        type-id: list<u8>,
+        /// Human-readable name. Matches
+        /// `wit-value-payload.symbolic-name`. Diagnostic-only.
+        /// Example:
+        ///   "mobilitydb:wasm/temporal-types@0.1.0/tfloat-sequence"
+        symbolic-name: string,
+        /// Wasm-side import the host invokes to deserialize the
+        /// payload's `bytes` into the WIT record. Convention:
+        ///   "<package>:wasm/serde-ops/<type-name>-from-canon-cbor"
+        decoder-import: string,
+        /// Wasm-side import the host invokes to encode the WIT
+        /// record back into canonical-CBOR bytes. Convention:
+        ///   "<package>:wasm/serde-ops/<type-name>-to-canon-cbor"
+        encoder-import: string,
+    }
 
     /// One scalar SQL function declared by the extension.
     record scalar-function-spec {
@@ -127,6 +155,21 @@ interface metadata {
         has-update-hook: bool,
         /// True if the extension also exports a `commit-hook` interface.
         has-commit-hook: bool,
+        /// True if the extension also exports a `wal-hook` interface.
+        /// When set, the host's spi-loader registers
+        /// `wal-hook.on-wal-hook` against the shared connection and
+        /// routes WAL-commit callbacks back through it. The
+        /// substrate installs at most one wal-hook callback on the
+        /// connection (SQLite's per-connection slot); v1 semantics
+        /// are last-write-wins across loaded extensions.
+        has-wal-hook: bool,
+        /// Identifier the host echoes back to `wal-hook.on-wal-hook`
+        /// when `has-wal-hook` is true. The host has no opinion on
+        /// the value; the extension chooses whatever it wants to
+        /// receive (lets one extension multiplex multiple wal-hook
+        /// implementations behind a single export). Ignored when
+        /// `has-wal-hook` is false.
+        wal-hook-id: u64,
         /// REQUIRED: every host capability the extension imports MUST be
         /// listed here. The loader compares this against
         /// `load-options.grant` and refuses to load if any item is
@@ -134,6 +177,57 @@ interface metadata {
         /// capabilities used (extension is pure / only uses its own
         /// allocator).
         declared-capabilities: list<capability>,
+        /// OPTIONAL: capabilities the extension *may* use if granted,
+        /// but does not require to load. The loader does NOT enforce
+        /// `optional  granted`. If a runtime call into an
+        /// optional-capability SPI is made without the grant in place,
+        /// the host returns SQLITE_PERM at the call site; extensions
+        /// are responsible for translating that into a useful
+        /// user-facing message.
+        ///
+        /// Use for "extension is mostly useful without X, but unlocks
+        /// extra functionality when X is granted" cases (e.g.
+        /// bundle-cli: Bundles is required to load, SpawnBuild is
+        /// optional and only `.bundle build` needs it).
+        ///
+        /// Default empty list. Items appearing in BOTH `declared-
+        /// capabilities` and `optional-capabilities` are treated as
+        /// declared (the strict gate wins).
+        optional-capabilities: list<capability>,
+        /// OPTIONAL in v1, REQUIRED in v1.1: the short prefix this
+        /// extension wants for SPARQL-style function namespacing
+        /// (PLAN-prefixes.md). Example: 'foaf'. Combined with
+        /// `prefix-expansion` to give each registered function both
+        /// a bare form (`name`, last-wins SQLite default semantics)
+        /// and a qualified form (`prefix__name`, always-available
+        /// for explicit dispatch).
+        ///
+        /// When missing in v1, the host synthesizes
+        ///   prefix    = sanitize(<crate-name>)
+        ///   expansion = "sqlink-internal://<crate-name>"
+        /// and emits a deprecation warning. v1.1 makes both fields
+        /// required at load time.
+        preferred-prefix: option<string>,
+        /// OPTIONAL in v1, REQUIRED in v1.1: opaque expansion string
+        /// that gives the prefix its global identity. Format is NOT
+        /// validated: can be a URI ('http://xmlns.com/foaf/0.1/'),
+        /// a Java-style namespace ('com.tegmentum.sqlink'), a UUID,
+        /// or any opaque token the extension author picks. Function
+        /// identity in `__sqlink_prefix_function` keys on this
+        /// expansion, not on the short prefix  the prefix is a
+        /// per-database alias for the expansion.
+        prefix-expansion: option<string>,
+        /// NEW IN @1.0.0: per-record decoder/encoder bindings for
+        /// the `sql-value::wit-value` arm. Empty list = this
+        /// extension does NOT ferry typed records (only the legacy
+        /// scalar arms of sql-value are exchanged). Codegen for
+        /// record-aware shims (PLAN-wit-value-extension.md Phase C)
+        /// emits one entry per record type the bridge marshals.
+        ///
+        /// The host registers these into its per-extension typed-
+        /// value registry at extension-init time; per-call lookup is
+        /// a hash-table hit keyed by `wit-value-payload.type-id`.
+        typed-values: list<typed-value-binding>,
     }
 
     /// Return the extension's full manifest. Called once by the host
@@ -246,6 +340,33 @@ interface commit-hook {
 
     /// Called after rollback completes.
     on-rollback: func();
+}
+
+/// Write-ahead-log hook. Active only if `manifest.has-wal-hook` is
+/// true. SQLite fires this after a WAL commit has appended
+/// `n-frames-in-wal` frames to the WAL for database `db-name`.
+///
+/// Return zero (SQLITE_OK) for normal continuation, or a non-zero
+/// SQLite result code to propagate the error to the calling SQL
+/// statement. Common use cases (the wal-archive extension being
+/// the canonical example) only ever return SQLITE_OK from here;
+/// non-zero codes are reserved for failure paths like
+/// "checkpoint required but couldn't acquire writer lock".
+///
+/// `hook-id` is the extension-chosen identifier the host echoes
+/// back so the extension can multiplex internally if it has more
+/// than one wal-hook implementation. v1 manifest declares the
+/// feature as a single bool (`has-wal-hook`); the extension picks
+/// the id it wants the host to pass (any non-zero u64 is fine).
+/// The substrate only ever installs one wal-hook callback at a
+/// time on the connection (SQLite allows a single wal-hook per
+/// connection).
+interface wal-hook {
+    on-wal-hook: func(
+        hook-id: u64,
+        db-name: string,
+        n-frames-in-wal: u32,
+    ) -> s32;
 }
 
 /// Virtual-table dispatch. The host calls every method with the

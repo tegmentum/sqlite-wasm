@@ -1,4 +1,4 @@
-package sqlite:extension@0.1.0;
+package sqlite:extension@1.0.0;
 
 /// Per-host-interface capability identifiers. An extension declares
 /// which of these it uses via `manifest.declared-capabilities`; the
@@ -39,6 +39,37 @@ interface policy {
         http,
         /// Outbound DNS resolution (sqlite:extension/dns).
         dns,
+        /// Raw WAL frame access (sqlite:extension/wal-frames).
+        /// Substrate for the wal-archive extension; gated separately
+        /// from `spi` so an extension can read WAL bytes without also
+        /// holding the full SQL surface (and vice versa).
+        wal-frames,
+        /// S3-compatible object storage (sqlite:extension/s3-base).
+        /// Substrate for the wal-archive extension's off-box sink.
+        /// Granting this lets the extension call get/put/delete/head/
+        /// list/copy against any S3-compatible endpoint (AWS S3,
+        /// MinIO, Cloudflare R2, etc.); the endpoint URL + credentials
+        /// are arguments to each call, not part of the policy  the
+        /// extension itself decides which bucket / region to hit. The
+        /// operator's grant is purely an allow-the-surface bit.
+        s3,
+        /// Host-resident cargo build (sqlite:extension/build).
+        /// Substrate for the `bundle-cli` extension's baked-binary
+        /// path (PLAN-bundles.md). Granting this lets the extension
+        /// spawn `cargo build` against a generated crate root;
+        /// no rich policy fields  the operator's grant is purely
+        /// an allow-the-surface bit. Browser deployments fail-closed
+        /// at the WIT contract (the sqlite-lib stub returns a clear
+        /// SQLITE_PERM-shaped error).
+        spawn-build,
+        /// Bundle storage (sqlite:extension/bundles). Read/write
+        /// the host's cas-cache bundle registry: insert / find /
+        /// list / show / delete / gc / record-binary / touch.
+        /// Granting this lets the extension manage the bundle
+        /// metadata layer above cas-cache; pairs with `spawn-build`
+        /// for the `.bundle save NAME` (with-build) path.
+        /// PLAN-bundles.md (#446).
+        bundles,
     }
 
     /// Outbound HTTP policy. Applied by the host's `http::handle`

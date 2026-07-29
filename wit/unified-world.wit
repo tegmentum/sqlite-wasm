@@ -34,10 +34,10 @@ world sqlite-cli-unified {
     export low-level;
     export high-level;
 
-    export sqlite:extension/types@0.1.0;
-    export sqlite:extension/spi@0.1.0;
-    export sqlite:extension/logging@0.1.0;
-    export sqlite:extension/config@0.1.0;
+    export sqlite:extension/types@1.0.0;
+    export sqlite:extension/spi@1.0.0;
+    export sqlite:extension/logging@1.0.0;
+    export sqlite:extension/config@1.0.0;
 
     import fts5-slot;
     import json1-slot;
@@ -80,10 +80,10 @@ world sqlite-cli-command {
     /// the host wires them in so subsequent stages can migrate
     /// eval_sql + dot.rs callers off the local connection one
     /// path at a time.
-    import sqlite:extension/spi@0.1.0;
-    import sqlite:extension/spi-loader@0.1.0;
-    import sqlite:extension/prepared@0.1.0;
-    import sqlite:extension/session@0.1.0;
+    import sqlite:extension/spi@1.0.0;
+    import sqlite:extension/spi-loader@1.0.0;
+    import sqlite:extension/prepared@1.0.0;
+    import sqlite:extension/session@1.0.0;
 }
 
 /// Programmatic SQLite library world.
@@ -106,15 +106,63 @@ world sqlite-cli-command {
 /// that don't need dynamic loading can satisfy `extension-loader`
 /// with a stub.
 world sqlite-library {
-    export sqlite:extension/types@0.1.0;
-    export sqlite:extension/spi@0.1.0;
-    export sqlite:extension/logging@0.1.0;
-    export sqlite:extension/config@0.1.0;
+    export sqlite:extension/types@1.0.0;
+    export sqlite:extension/spi@1.0.0;
+    export sqlite:extension/logging@1.0.0;
+    export sqlite:extension/config@1.0.0;
+    /// Raw WAL-frame access. Browser-side this returns the
+    /// documented no-WAL sentinels until vfs-tvm grows WAL
+    /// support (#437); the contract stays honored so widened
+    /// worlds that import wal-frames can compose against
+    /// sqlite-lib without panicking.
+    export sqlite:extension/wal-frames@1.0.0;
+    /// S3-compatible object storage. Browser-side this returns
+    /// a structured "not implemented" error until the polyfill
+    /// bridge (fetch + SigV4 in JS) lands as a follow-up to
+    /// #437  the wal-archive extension's primary off-box sink
+    /// requires native deployment for v1.
+    export sqlite:extension/s3-base@1.0.0;
+    /// Host-resident cargo build. Browser-side this is stubbed
+    /// (wasm sandboxes can't spawn cargo); the contract is
+    /// exported so worlds that import build link cleanly
+    /// against sqlite-lib. The bundle-cli extension's baked-
+    /// binary path requires native deployment by design.
+    export sqlite:extension/build@1.0.0;
+    /// Bundle registry CRUD. Browser-side this is stubbed
+    /// (no host cas-cache reachable from the wasm sandbox);
+    /// the contract is exported so worlds that import bundles
+    /// link cleanly against sqlite-lib. A future browser
+    /// deployment can implement IndexedDB-backed bundles.
+    export sqlite:extension/bundles@1.0.0;
 
     export low-level;
     export high-level;
     export library;
+    /// Host-resident scalar registration bridge. The JS host calls
+    /// `dispatch-bridge.register-host-scalar` from its
+    /// `spi-loader.register-scalar` impl, sqlite-lib installs a
+    /// `sqlite3_create_function_v2` trampoline whose body re-enters
+    /// the host via the imported `dispatch.scalar-call`. See
+    /// `wit/dispatch-bridge.wit` for the full lifecycle.
+    export dispatch-bridge;
+    /// CAS-cache `bridged-execute-cas` slice, split out of
+    /// `dispatch-bridge` so consumers that only need cas-conn SQL
+    /// access (the bundle-cli extension; the native sqlink-host)
+    /// don't carry the 11 register-host-* trampolines. The browser
+    /// composed binary continues to export both: sqlite-lib's
+    /// composed runtime serves cas reads/writes through this
+    /// interface the same way it previously did through
+    /// `dispatch-bridge.bridged-execute-cas`.
+    export dispatch-bridge-cas;
 
     import extension-loader;
     import dispatch;
+    /// Host-implemented OPFS file ops backing the `opfs` VFS the
+    /// browser composed runtime uses for `shared_cas_conn` so the
+    /// cas db survives page reloads. See wit/opfs-host.wit for the
+    /// per-op contract. Native sqlite-lib targets satisfy this with
+    /// a stub (cas db opens against the native filesystem and never
+    /// calls into opfs-host); the browser composed cli wires this
+    /// to navigator.storage.getDirectory().
+    import opfs-host;
 }

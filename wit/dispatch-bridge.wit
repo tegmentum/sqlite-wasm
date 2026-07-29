@@ -1,0 +1,281 @@
+package sqlite:wasm@0.1.0;
+
+/// Host  sqlite-lib bridge for registering host-resident
+/// scalar functions on sqlite-lib's internal default connection.
+///
+/// Why this exists: in the native scenario the host owns the
+/// `sqlite3*` connection that serves both `spi.execute` and
+/// `spi-loader.register-scalar`, so `sqlite3_create_function_v2`
+/// from register-scalar is immediately visible to the SQL the cli
+/// runs afterwards. In the composed `cli + sqlite-lib` browser
+/// scenario the cli's `spi.execute` is served by sqlite-lib's
+/// in-WASM connection but `spi-loader.register-scalar` is served
+/// by the JS host  the JS host has no path to inject a function
+/// into sqlite-lib's connection. This interface gives the host
+/// that path.
+///
+/// Usage from the JS host's `spi-loader.register-scalar` impl:
+///
+///   1. Record the (ext-name, func-id) in the JS registry so
+///      `dispatch.scalar-call` can route the call back.
+///   2. Call `dispatch-bridge.register-host-scalar(ext-name, name,
+///      num-args, func-id)`. Sqlite-lib installs a native
+///      `sqlite3_create_function_v2` trampoline on its connection
+///      whose body calls back out via the imported
+///      `dispatch.scalar-call(ext-name, func-id, args)`.
+///   3. When the cli later runs SQL that invokes `name`, sqlite-lib's
+///      trampoline fires, the imported `dispatch.scalar-call`
+///      re-enters the host, the host's JS impl looks up the
+///      registration, runs the transpiled extension's
+///      `scalar-function.call`, and returns the result.
+///
+/// On `.unload`, the JS host calls `unregister-extension(ext-name)`
+/// and sqlite-lib drops every trampoline keyed under that ext-name.
+interface dispatch-bridge {
+    use sqlite:extension/types@1.0.0.{sqlite-error, sql-value, query-result};
+
+    /// Bridged `sqlite:extension/spi.execute`. Cli-family extensions
+    /// loaded outside the composed binary (e.g. JS-side runtime-bindgen
+    /// in browser) cannot reach the internal `sqlite:extension/spi`
+    /// instance the cli/lib pair was composed with — the WAC recipe
+    /// wires that handoff internally and the outer world doesn't
+    /// re-export it. This entry on the already-public dispatch-bridge
+    /// gives them a way in: proxies to sqlite-lib's internal
+    /// `spi.execute` against the same shared connection the cli sees,
+    /// so a browser-side extension running
+    /// `spi.execute("SELECT * FROM __sqlink_prefix")` reads the rows
+    /// the composed cli just wrote via the same connection.
+    ///
+    /// Native cli-family extensions still bind `sqlite:extension/spi`
+    /// directly through native wit-bindgen — this is the import-fallback
+    /// shape for the browser scenario.
+    bridged-execute: func(
+        sql: string,
+        params: list<sql-value>,
+    ) -> result<query-result, sqlite-error>;
+
+    /// Register a host-resident scalar function on sqlite-lib's
+    /// internal connection. When SQL invokes `name`, sqlite-lib
+    /// calls back to the host via the imported
+    /// `dispatch.scalar-call(ext-name, func-id, args)`.
+    ///
+    /// `num-args` follows SQLite's convention: -1 = variadic,
+    /// otherwise the fixed arity. `func-id` is the manifest-
+    /// assigned identifier the host uses to dispatch.
+    register-host-scalar: func(
+        ext-name: string,
+        name: string,
+        num-args: s32,
+        func-id: u64,
+    ) -> result<_, sqlite-error>;
+
+    /// Register a host-resident aggregate function on sqlite-lib's
+    /// internal connection. When SQL invokes `name`, sqlite-lib
+    /// installs xStep / xFinal slots whose trampolines re-enter
+    /// the host via the imported `dispatch.aggregate-step` and
+    /// `dispatch.aggregate-finalize`. When `is-window` is true,
+    /// the function is registered as a window function via
+    /// `sqlite3_create_window_function`, wiring xValue + xInverse
+    /// to `dispatch.aggregate-value` and `dispatch.aggregate-inverse`
+    /// as well.
+    ///
+    /// Per-aggregation state lives in `sqlite3_aggregate_context`:
+    /// the wasm-side trampoline allocates a fresh `context-id`
+    /// counter on the first xStep for each aggregation and threads
+    /// it through every subsequent dispatch call for that
+    /// aggregation. The host's dispatch impl uses `context-id` to
+    /// key any per-aggregation state.
+    register-host-aggregate: func(
+        ext-name: string,
+        name: string,
+        num-args: s32,
+        func-id: u64,
+        is-window: bool,
+    ) -> result<_, sqlite-error>;
+
+    /// Register a host-resident collation on sqlite-lib's internal
+    /// connection. When SQL compares two strings under `name`,
+    /// sqlite-lib calls back to the host via the imported
+    /// `dispatch.collation-compare(ext-name, collation-id, a, b)`,
+    /// which routes to the loaded extension's compare callback.
+    /// Stateless: there's no per-comparison context, so the
+    /// trampoline just marshals args and forwards the result.
+    register-host-collation: func(
+        ext-name: string,
+        name: string,
+        collation-id: u64,
+    ) -> result<_, sqlite-error>;
+
+    /// Install an authorizer trampoline on sqlite-lib's internal
+    /// connection routed to `ext-name`. SQLite invokes the
+    /// authorizer during statement compilation; the trampoline
+    /// re-enters the host via the imported `dispatch.authorize`,
+    /// passes through the standard auth-action / arg1 / arg2 /
+    /// database / trigger tuple, and maps the host's `auth-result`
+    /// back to `SQLITE_OK` / `SQLITE_DENY` / `SQLITE_IGNORE`.
+    ///
+    /// SQLite allows only one authorizer per connection; v1
+    /// semantics are last-write-wins. Re-registering for the same
+    /// `ext-name` replaces the previous trampoline. Calling for a
+    /// different `ext-name` while one is active overwrites it; the
+    /// host is responsible for fan-out if multiple extensions
+    /// declared `has-authorizer`.
+    ///
+    /// Cleared by `unregister-extension(ext-name)`: the trampoline
+    /// is removed when the matching ext-name is unregistered. If
+    /// another extension's trampoline is currently active,
+    /// unregistering a stale ext-name is a no-op.
+    register-host-authorizer: func(
+        ext-name: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Install an update-hook trampoline on sqlite-lib's internal
+    /// connection routed to `ext-name`. SQLite fires update hooks
+    /// AFTER the row write commits to the page cache for
+    /// INSERT/UPDATE/DELETE on rowid tables; the trampoline
+    /// re-enters the host via the imported `dispatch.on-update`
+    /// with `(operation, database, table, rowid)`. No return value
+    /// — update hooks cannot veto.
+    ///
+    /// SQLite allows only one update-hook per connection; v1
+    /// semantics are last-write-wins. Cleared by
+    /// `unregister-extension(ext-name)`.
+    register-host-update-hook: func(
+        ext-name: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Install a commit-hook trampoline on sqlite-lib's internal
+    /// connection routed to `ext-name`. SQLite fires the commit
+    /// hook immediately before commit; if the host's
+    /// `dispatch.on-commit` returns `false` the commit converts to
+    /// a rollback (matches SQLite's "non-zero abort" semantics —
+    /// the trampoline maps `false` to a non-zero return).
+    ///
+    /// SQLite allows only one commit-hook per connection; v1
+    /// semantics are last-write-wins. Cleared by
+    /// `unregister-extension(ext-name)`.
+    register-host-commit-hook: func(
+        ext-name: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Install a rollback-hook trampoline on sqlite-lib's internal
+    /// connection routed to `ext-name`. SQLite fires the rollback
+    /// hook after rollback completes; the trampoline re-enters the
+    /// host via the imported `dispatch.on-rollback(ext-name)`. No
+    /// return value, no veto.
+    ///
+    /// SQLite allows only one rollback-hook per connection; v1
+    /// semantics are last-write-wins. Cleared by
+    /// `unregister-extension(ext-name)`.
+    register-host-rollback-hook: func(
+        ext-name: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Install a wal-hook trampoline on sqlite-lib's internal
+    /// connection routed to `ext-name` + `hook-id`. SQLite fires the
+    /// wal-hook AFTER a WAL commit has appended `n-frames-in-wal`
+    /// frames to the WAL for database `db-name`; the trampoline
+    /// re-enters the host via the imported `dispatch.wal-hook` with
+    /// the same `(ext-name, hook-id, db-name, n-frames-in-wal)`.
+    /// Return value: SQLITE_OK (0) for normal continuation, any
+    /// other code propagates as an error to the calling SQL
+    /// statement.
+    ///
+    /// SQLite allows only one wal-hook per connection; v1 semantics
+    /// are last-write-wins. Cleared by
+    /// `unregister-extension(ext-name)`. Substrate primitive used by
+    /// the wal-archive extension.
+    register-host-wal-hook: func(
+        ext-name: string,
+        hook-id: u64,
+    ) -> result<_, sqlite-error>;
+
+    /// Install a virtual-table module trampoline on sqlite-lib's
+    /// internal connection routed to `ext-name` + `vtab-id`. SQLite
+    /// invokes the per-module xCreate/xConnect/xBestIndex/xOpen/
+    /// xClose/xFilter/xNext/xEof/xColumn/xRowid/xDisconnect/xDestroy
+    /// callbacks the trampoline installs via
+    /// `sqlite3_create_module_v2(name, &module, aux, destructor)`.
+    /// Each callback re-enters the host via the matching
+    /// `dispatch.vtab-*` import, threading
+    /// `(ext-name, vtab-id, instance-id, cursor-id)` through so the
+    /// host can route the call back to the loaded extension's `vtab`
+    /// (and, when `mutable`, `vtab-update`) exports.
+    ///
+    /// - `eponymous = true`  install with xCreate = NULL so the
+    ///   module name itself is usable as a TVF (no
+    ///   `CREATE VIRTUAL TABLE` required).
+    /// - `mutable = true`  pick the iVersion-2 module template that
+    ///   also wires xUpdate / xBegin / xSync / xCommit / xRollback /
+    ///   xRename / xSavepoint / xRelease / xRollbackTo to the
+    ///   `dispatch.vtab-*` mutating imports.
+    /// - `batched = true`  the trampoline calls
+    ///   `dispatch.vtab-fetch-batch` once per block instead of
+    ///   per-row `vtab-column` / `vtab-rowid` / `vtab-next`, serving
+    ///   xColumn / xRowid / xNext from a wasm-side row cache.
+    ///
+    /// Signature mirrors `spi-loader.register-vtab` exactly. Cleared
+    /// by `unregister-extension(ext-name)`: every module registered
+    /// under that ext-name is dropped by re-registering a null
+    /// module under the same name (SQLite has no first-class remove
+    /// module API).
+    register-host-vtab: func(
+        ext-name: string,
+        name: string,
+        vtab-id: u64,
+        eponymous: bool,
+        mutable: bool,
+        batched: bool,
+    ) -> result<_, sqlite-error>;
+
+    /// Drop every host registration (scalar, aggregate, collation,
+    /// authorizer, update/commit/rollback hook, vtab module)
+    /// belonging to `ext-name`. Mirrors
+    /// `spi-loader.unregister-extension` on the wasm side.
+    /// Idempotent: unregistering an extension with no registrations
+    /// is a no-op.
+    unregister-extension: func(ext-name: string);
+}
+
+/// CAS-cache slice of the dispatch-bridge surface.
+///
+/// Split out of `dispatch-bridge` so the native sqlink-host can
+/// implement just this method without standing up the 11
+/// register-host-* trampolines that only make sense inside the
+/// composed wasm binary (they install
+/// `sqlite3_create_function_v2` hooks on sqlite-lib's internal
+/// connection — a substrate the native host doesn't expose to
+/// loaded extensions).
+///
+/// Consumed by:
+///   - `extensions/bundle-cli` (and any future CAS-touching cli
+///     extension) via the `bundle-cli` world.
+///   - The native sqlink-host via `impl dispatch_bridge_cas::Host
+///     for LoadedState`, routing to `Cache::with_bundles_conn`.
+///   - The composed binary's sqlite-lib via
+///     `impl DispatchBridgeCasGuest`, routing to `cas_with` (the
+///     same target the original `dispatch-bridge.bridged-execute-cas`
+///     served before the split).
+///
+/// Same `(sql, params) -> result<query-result, sqlite-error>`
+/// shape as `dispatch-bridge.bridged-execute` so callers can
+/// share encoding helpers. Schema bootstrap is the caller's
+/// responsibility (native host runs it via the existing
+/// `Cache::with_bundles_conn` path; browser polyfill — soon to
+/// be deleted — used to drive it from JS).
+interface dispatch-bridge-cas {
+    use sqlite:extension/types@1.0.0.{sqlite-error, sql-value, query-result};
+
+    /// Bridged execute against sqlite-lib's CAS-cache connection.
+    /// Native host: `~/.cache/sqlink/cas.db`. Composed binary
+    /// (browser): the in-WASM cas connection sqlite-lib maintains
+    /// behind `cas_with`. The two callers see the same SQL
+    /// surface — the bundles-CRUD strings in
+    /// `sqlite_cas_cache::bundles_exec` and the schema bootstrap
+    /// strings in `sqlite_cas_cache::schema` (shared crate, single
+    /// source of truth).
+    bridged-execute-cas: func(
+        sql: string,
+        params: list<sql-value>,
+    ) -> result<query-result, sqlite-error>;
+}

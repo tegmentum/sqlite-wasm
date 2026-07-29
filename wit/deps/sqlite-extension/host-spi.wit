@@ -1,4 +1,4 @@
-package sqlite:extension@0.1.0;
+package sqlite:extension@1.0.0;
 
 /// Top-level SQL execution. Host imports for extensions that need to
 /// run SQL against the embedding database.
@@ -125,6 +125,217 @@ interface spi {
     open-db: func(path: string) -> result<_, sqlite-error>;
 }
 
+/// Raw WAL frame access for extensions that ship the WAL bytes
+/// off-box (the canonical consumer is `wal-archive`). Distinct
+/// from `spi` so capability gating can grant WAL access without
+/// also granting the full SQL surface  and vice versa.
+///
+/// Native impl: reads the on-disk `<db_path>-wal` sidecar file
+/// directly. Browser impl: stubbed until vfs-tvm grows WAL
+/// support (#437); `get-wal-header` returns `None` and
+/// `read-frames` errors.
+///
+/// Substrate for PLAN-wal-archive-extension.md (#439).
+interface wal-frames {
+    use types.{sqlite-error};
+
+    /// 32-byte WAL file header (the SQLite WAL format header,
+    /// not the per-frame header). `None` when journal_mode  wal
+    /// or the WAL file doesn't exist yet. Extensions parse
+    /// `page_size` from this header (offset 8, big-endian u32)
+    /// before calling `read-frames`.
+    get-wal-header: func(db-name: string)
+        -> result<option<list<u8>>, sqlite-error>;
+
+    /// `n-frames` frames starting at `start-frame` (1-based per
+    /// SQLite's WAL format). Each frame is `24 + page_size` bytes.
+    /// The caller MUST derive `page_size` from `get-wal-header`
+    /// first; the host won't second-guess the requested range.
+    /// Errors on out-of-bounds reads.
+    read-frames: func(db-name: string, start-frame: u32, n-frames: u32)
+        -> result<list<u8>, sqlite-error>;
+}
+
+/// S3-compatible object storage SPI. Mirrors the `s3-base` interface
+/// from `~/git/s3-wasm` exactly (method signatures + types) so the
+/// native host bridge can pass parameters through untransformed if a
+/// later iteration switches from in-host (aws-sigv4 + reqwest) to
+/// composing the s3-wasm component into the host.
+///
+/// Native impl: signs requests with the aws-sigv4 Rust crate +
+/// dispatches via the host's existing reqwest blocking client.
+/// Browser impl (sqlite-lib): stubbed to a structured "not
+/// implemented" error until the polyfill bridge (fetch+SigV4 in JS)
+/// lands as a follow-up to #437.
+///
+/// Capability gating: every method checks
+/// `manifest.declared-capabilities` for `capability::s3` and
+/// returns `SQLITE_PERM` otherwise. Substrate for PLAN-wal-archive-
+/// extension.md (#440)  the wal-archive extension's primary off-box
+/// sink.
+interface s3-base {
+    use types.{sqlite-error};
+
+    /// S3 error variants. Same shape as s3-wasm's `s3-types.error`
+    /// so the bridge can map both directions without information
+    /// loss.
+    variant s3-error {
+        /// Invalid credentials or signature.
+        access-denied,
+        /// Bucket does not exist.
+        no-such-bucket,
+        /// Object does not exist.
+        no-such-key,
+        /// Invalid bucket name.
+        invalid-bucket-name,
+        /// Invalid request parameters.
+        invalid-request(string),
+        /// Network or connection error.
+        network-error(string),
+        /// XML parsing error.
+        parse-error(string),
+        /// Internal error.
+        internal(string),
+        /// Capability not granted at load time. Distinct from
+        /// access-denied (which is an S3-side authorization
+        /// failure) so callers can tell apart "operator denied
+        /// the grant" vs "the bucket policy rejected the key".
+        capability-not-granted,
+    }
+
+    /// Credentials for S3 authentication. `session-token` carries
+    /// STS-issued temporary credentials' opaque blob.
+    record s3-credentials {
+        access-key-id: string,
+        secret-access-key: string,
+        session-token: option<string>,
+    }
+
+    /// S3 endpoint configuration. `url` is the base endpoint, e.g.
+    /// `https://s3.amazonaws.com` or `http://localhost:9000` for a
+    /// MinIO / mock test server. `path-style` selects path-vs-
+    /// subdomain bucket addressing  required for most localhost
+    /// fixtures.
+    record s3-endpoint-config {
+        url: string,
+        region: string,
+        path-style: bool,
+    }
+
+    /// Object metadata returned by GET / HEAD.
+    record s3-object-metadata {
+        content-type: option<string>,
+        content-length: option<u64>,
+        etag: option<string>,
+        last-modified: option<u64>,
+        custom: list<tuple<string, string>>,
+    }
+
+    /// One row in a list-objects response.
+    record s3-object-info {
+        key: string,
+        size: u64,
+        etag: option<string>,
+        last-modified: option<u64>,
+        storage-class: option<string>,
+    }
+
+    /// Options for get-object.
+    record s3-get-object-options {
+        range: option<tuple<u64, u64>>,
+        if-match: option<string>,
+        if-none-match: option<string>,
+    }
+
+    /// Options for put-object.
+    record s3-put-object-options {
+        content-type: option<string>,
+        metadata: list<tuple<string, string>>,
+        cache-control: option<string>,
+    }
+
+    /// Options for list-objects.
+    record s3-list-objects-options {
+        prefix: option<string>,
+        delimiter: option<string>,
+        max-keys: option<u32>,
+        continuation-token: option<string>,
+    }
+
+    record s3-get-object-output {
+        body: list<u8>,
+        metadata: s3-object-metadata,
+    }
+
+    record s3-put-object-output {
+        etag: string,
+    }
+
+    record s3-head-object-output {
+        metadata: s3-object-metadata,
+    }
+
+    record s3-list-objects-output {
+        objects: list<s3-object-info>,
+        common-prefixes: list<string>,
+        next-continuation-token: option<string>,
+        is-truncated: bool,
+    }
+
+    /// Get an object from a bucket.
+    get-object: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        bucket: string,
+        key: string,
+        options: option<s3-get-object-options>,
+    ) -> result<s3-get-object-output, s3-error>;
+
+    /// Put an object into a bucket.
+    put-object: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        bucket: string,
+        key: string,
+        body: list<u8>,
+        options: option<s3-put-object-options>,
+    ) -> result<s3-put-object-output, s3-error>;
+
+    /// Delete an object from a bucket.
+    delete-object: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        bucket: string,
+        key: string,
+    ) -> result<_, s3-error>;
+
+    /// HEAD an object  metadata without the body.
+    head-object: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        bucket: string,
+        key: string,
+    ) -> result<s3-head-object-output, s3-error>;
+
+    /// List objects in a bucket.
+    list-objects: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        bucket: string,
+        options: option<s3-list-objects-options>,
+    ) -> result<s3-list-objects-output, s3-error>;
+
+    /// Copy an object within S3 (server-side, no local round-trip).
+    copy-object: func(
+        endpoint: s3-endpoint-config,
+        credentials: s3-credentials,
+        source-bucket: string,
+        source-key: string,
+        dest-bucket: string,
+        dest-key: string,
+    ) -> result<s3-put-object-output, s3-error>;
+}
+
 /// Loader / host-specific extensions to `spi`. Distinct interface
 /// because these methods are about hosting OTHER extensions (the
 /// register-* trampolines + cli-mode toggles), not about querying
@@ -222,6 +433,20 @@ interface spi-loader {
     /// Install the loaded extension as the active commit + rollback
     /// hook pair. Stage 5e.10.
     register-commit-hook: func(ext-name: string) -> result<_, sqlite-error>;
+
+    /// Install the loaded extension's `wal-hook.on-wal-hook` callback
+    /// (selected by `hook-id`) as the active WAL hook on the host's
+    /// shared connection. SQLite fires the wal-hook after each WAL
+    /// commit; the host's trampoline re-enters the extension via the
+    /// imported `dispatch.wal-hook` with the matching `hook-id`.
+    ///
+    /// SQLite allows only one wal-hook per connection; v1 semantics
+    /// are last-write-wins. Cleared by `unregister-extension(ext-name)`.
+    /// Substrate primitive used by the wal-archive extension.
+    register-wal-hook: func(
+        ext-name: string,
+        hook-id: u64,
+    ) -> result<_, sqlite-error>;
 
     /// Register a virtual-table module on the host's shared
     /// connection. The host installs a native sqlite3_module whose
@@ -506,6 +731,209 @@ interface dns {
     /// Empty list means resolution succeeded but no records of that
     /// type were returned (distinct from `nxdomain`).
     resolve: func(name: string, record-type: record-type) -> result<list<string>, dns-error>;
+}
+
+/// Host-resident build SPI. Spawn `cargo` against a generated
+/// crate root and return the produced binary path. Substrate for
+/// PLAN-bundles.md (#445/#446)  the `bundle-cli` extension uses
+/// this to materialize the baked sqlink binary for a saved
+/// bundle.
+///
+/// Native impl: `std::process::Command` against the supplied
+/// `crate-root`. Captures stdout/stderr and returns
+/// `binary-path` resolved under the produced
+/// `target/<triple>/release/` directory. Respects the caller-
+/// supplied env tuples (passed through to the child).
+///
+/// Browser impl (sqlite-lib): stubbed  returns a clear
+/// `sqlite-error` since wasm sandboxes can't spawn cargo.
+///
+/// Capability gating: every method checks
+/// `manifest.declared-capabilities` for `capability::spawn-build`
+/// and returns `SQLITE_PERM` otherwise. The host owns the path
+/// validation hook  the spec keeps this interface narrow on
+/// purpose so the policy gate is the entire access control.
+interface build {
+    use types.{sqlite-error};
+
+    /// Output of a successful build. `binary-path` is an absolute
+    /// path on the host filesystem to the produced binary;
+    /// `stdout` / `stderr` are the captured streams from cargo
+    /// (useful for surfacing build progress / warnings to the
+    /// extension's caller).
+    record build-out {
+        binary-path: string,
+        stdout: string,
+        stderr: string,
+    }
+
+    /// Spawn `cargo build --release` against the supplied
+    /// `crate-root`. When `target-triple` is `some(<triple>)`,
+    /// the host passes `--target <triple>` so the build produces
+    /// the binary under `target/<triple>/release/`; otherwise
+    /// the default host target is used. The `env` tuples are
+    /// merged into the child process's environment (caller
+    /// values override the inherited environment, matching
+    /// `std::process::Command::env`).
+    ///
+    /// When `cargo-package` is `some(<name>)`, the host passes
+    /// `-p <name>` so cargo builds just that workspace member
+    /// rather than the default package. When `features` is
+    /// non-empty, the host passes `--features <comma-joined>`.
+    /// Both default to "off" so the prior single-crate call shape
+    /// keeps working unchanged. (Named `cargo-package` rather than
+    /// `package` because `package` is a reserved keyword in WIT.)
+    ///
+    /// Returns `build-out` on success. Errors carry a
+    /// non-zero SQLITE_* code and a message that includes the
+    /// cargo exit status and the tail of stderr.
+    spawn-build: func(
+        crate-root: string,
+        target-triple: option<string>,
+        env: list<tuple<string, string>>,
+        cargo-package: option<string>,
+        features: list<string>,
+    ) -> result<build-out, sqlite-error>;
+}
+
+/// Bundle storage SPI. Read/write the host's cas-cache bundle
+/// registry. Substrate for PLAN-bundles.md (#446)  the `bundle-cli`
+/// extension calls these methods to record, look up, and prune
+/// named extension sets. The cas-cache lives at
+/// `~/.cache/sqlink/cas.sqlite`; it's host-managed and not
+/// reachable via `spi.execute` (which runs against the user's main
+/// connection), so this dedicated SPI exists.
+///
+/// Identity model: a `set-hash` is the SHA-256 (hex) of the sorted
+/// `(extension-name, content-hash)` tuples. Two bundles with the
+/// same members share the same `set-hash` and the same internal
+/// bundle row; multiple `name`s pointing at the same `set-hash`
+/// is allowed (alias semantics).
+///
+/// Capability gating: every method checks
+/// `manifest.declared-capabilities` for `capability::bundles`
+/// and returns `SQLITE_PERM` otherwise.
+interface bundles {
+    use types.{sqlite-error};
+
+    /// One member in a bundle  an (extension-name, content-hash)
+    /// pair. `content-hash` is the blake3-hex digest the host
+    /// already maintains in cas-cache for the extension bytes
+    /// (matches what `loader-bridge.extension-digest` returns).
+    record bundle-member {
+        extension-name: string,
+        content-hash: string,
+    }
+
+    /// Compact bundle row for `list` / `find-by-*`. Members
+    /// omitted; use `show` to fetch the full member list.
+    record bundle-summary {
+        id: u64,
+        name: option<string>,
+        set-hash: string,
+        created-at: u64,
+        last-used-at: u64,
+        member-count: u32,
+        binary-count: u32,
+    }
+
+    /// One baked binary row in `bundle-detail`.
+    record bundle-binary {
+        target-triple: string,
+        binary-path: string,
+        built-at: u64,
+    }
+
+    /// Full bundle row for `show`  members + binaries.
+    record bundle-detail {
+        summary: bundle-summary,
+        members: list<bundle-member>,
+        binaries: list<bundle-binary>,
+    }
+
+    /// GC policy. Exactly one of the two knobs should be set;
+    /// callers pass `none` for the unused field.
+    record gc-policy {
+        /// LRU eviction: keep at most this many bundles, drop the
+        /// rest in last-used-at ascending order. `none` means no
+        /// LRU cap.
+        keep-last: option<u32>,
+        /// Age eviction: drop bundles whose last-used-at is more
+        /// than this many seconds in the past. `none` means no
+        /// age cap.
+        older-than-secs: option<u64>,
+    }
+
+    /// Insert or alias a bundle. The host computes nothing  the
+    /// caller has already sorted+hashed `members` into `set-hash`.
+    /// Idempotent on `set-hash`: if a row already exists with the
+    /// same `set-hash`, this binds `name` as an alias to that row
+    /// (returning its id) instead of creating a duplicate. Errors
+    /// if `name` is already bound to a DIFFERENT `set-hash`.
+    bundle-save: func(
+        name: option<string>,
+        set-hash: string,
+        members: list<bundle-member>,
+    ) -> result<u64, sqlite-error>;
+
+    /// Exact-name lookup. Returns `none` if no bundle has that name.
+    bundle-find-by-name: func(name: string)
+        -> result<option<bundle-summary>, sqlite-error>;
+
+    /// Hash-prefix lookup. Returns all bundles whose `set-hash`
+    /// starts with `prefix`. Empty list = no matches; multiple
+    /// rows = ambiguous prefix (caller decides whether to error).
+    bundle-find-by-hash-prefix: func(prefix: string)
+        -> result<list<bundle-summary>, sqlite-error>;
+
+    /// Every bundle, ordered last-used-at descending.
+    bundle-list: func() -> result<list<bundle-summary>, sqlite-error>;
+
+    /// Full detail (members + binaries) for the bundle identified
+    /// by id. Errors if no such row.
+    bundle-show: func(id: u64) -> result<bundle-detail, sqlite-error>;
+
+    /// Drop the bundle row + its members + its binary rows.
+    /// Cas-cache artifact bytes are NOT touched  bundles are a
+    /// metadata layer above the cas-cache's content-addressed
+    /// storage. Errors if no such row.
+    bundle-delete: func(id: u64) -> result<_, sqlite-error>;
+
+    /// LRU / age-based prune. Returns the ids of dropped rows.
+    bundle-gc: func(policy: gc-policy) -> result<list<u64>, sqlite-error>;
+
+    /// Record a freshly-built binary against an existing bundle.
+    /// `target-triple` keys the row; re-recording the same triple
+    /// updates `binary-path` + `built-at`.
+    bundle-record-binary: func(
+        id: u64,
+        target-triple: string,
+        binary-path: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Update `last-used-at` for the bundle. Called by `bundle-cli`
+    /// on every `.bundle show` / launch-flag resolve so LRU GC
+    /// reflects actual use.
+    bundle-touch: func(id: u64);
+
+    /// Bind an additional short name to an existing bundle. The
+    /// underlying `bundle-id` doesn't change  the new alias just
+    /// becomes another way to reach the same row through
+    /// `bundle-find-by-name`. Idempotent if `alias` already points
+    /// at `bundle-id`; errors with the alias-conflict shape if it
+    /// points at a different bundle.
+    bundle-add-alias: func(
+        bundle-id: u64,
+        alias: string,
+    ) -> result<_, sqlite-error>;
+
+    /// Remove one short alias. The bundle itself is left intact
+    /// other aliases (and id / set_hash lookups) continue to
+    /// reach the row. Returns `false` if the alias didn't exist.
+    bundle-remove-alias: func(alias: string) -> result<bool, sqlite-error>;
+
+    /// All aliases bound to `bundle-id`, lexicographically.
+    bundle-aliases: func(bundle-id: u64) -> result<list<string>, sqlite-error>;
 }
 
 /// `sqlite3_session_*` API surfaced as named handles. Per
