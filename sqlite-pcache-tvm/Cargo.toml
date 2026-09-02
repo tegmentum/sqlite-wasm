@@ -40,4 +40,4 @@ sqlite-component-core = { path = "../core" }
 # (`tvm_load_*`, `tvm_copy_to_default`, ...). The `tvm-mm-link`
 # static-linker step at sqlite-lib build time satisfies the
 # `tvm_mm.*` imports the helpers emit.
-tvm-guest-mm-rt = { git = "https://github.com/tegmentum/tvm-wasm.git", rev = "6f3bae38fad4addd4de1837ab151f4ac871d1dd4" }
+tvm-guest-mm-rt = { git = "https://github.com/tegmentum/tvm-wasm.git", tag = "v0.1.0" }
